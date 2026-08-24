@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-08-25
+
+### Added
+
+- Publish the queue snapshot for peer extensions: a `queue-steer:state` emission on the shared `pi.events` bus on every change, mirrored on `globalThis.__tmustierPiQueueSteerState` for synchronous reads (immune to extension load order, surviving `/reload` runtime swaps). `{ pending, paused, blocked }` counts every held row — both lanes, paused, edit-held, and behind blocking control rows — so consumers can tell a parked backlog apart from a genuinely idle session. pi-ledger ≥ 0.6.0 uses it to hold back its no-credit engagement wizard while the queue has undispatched work.
+
+
 ## 0.4.0 - 2026-08-25
 
 ### Added
