@@ -411,3 +411,51 @@ test("real registered drain command pours queued rows into one steering message"
 	}
 });
 
+
+
+test("publishes queue state on pi.events and globalThis for interop consumers", async () => {
+	interface StateSnapshot {
+		pending: number;
+		paused: boolean;
+		blocked: boolean;
+	}
+	const emissions: StateSnapshot[] = [];
+	const listenerExtension: ExtensionFactory = (pi) => {
+		pi.events.on("queue-steer:state", (data) => {
+			emissions.push(data as StateSnapshot);
+		});
+	};
+	const harness = await createIntegrationHarness({ extraExtensions: [listenerExtension] });
+	const mirror = () => globalThis.__tmustierPiQueueSteerState;
+	try {
+		await seedSession(harness);
+		// Idle with an empty queue: the mirror reflects the settled state.
+		assert.deepEqual(mirror(), { pending: 0, paused: false, blocked: false });
+
+		const active = gatedResponse("active response");
+		harness.faux.setResponses([active.step, fauxAssistantMessage("queued follow-up done")]);
+		const settled = nextAgentRun(harness.session);
+		const activeStarted = nextAgentStart(harness.session);
+		const activePrompt = harness.session.prompt("active prompt");
+		await within(activeStarted, () => "interop-test agent did not start");
+		await harness.session.prompt("queued follow-up", { streamingBehavior: "followUp" });
+
+		// A parked row is visible synchronously and was emitted on the bus.
+		assert.equal(mirror()?.pending, 1);
+		assert.equal(emissions.at(-1)?.pending, 1);
+
+		active.release();
+		await activePrompt;
+		await within(settled, () => "queued follow-up did not settle");
+
+		// The dispatched row left the queue: mirror and last emission agree on empty.
+		assert.deepEqual(mirror(), { pending: 0, paused: false, blocked: false });
+		assert.equal(emissions.at(-1)?.pending, 0);
+		const pendings = emissions.map((emission) => emission.pending);
+		assert.ok(pendings.includes(1), `expected a pending=1 emission, saw ${JSON.stringify(emissions)}`);
+	} finally {
+		await harness.cleanup();
+		globalThis.__tmustierPiQueueSteerState = undefined;
+	}
+});
+

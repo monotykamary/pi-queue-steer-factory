@@ -178,6 +178,15 @@ For display, it extracts the live editor’s text and cursor from the editor fra
 
 The extension composes with custom editors including raw-paste and pi-session-hud.
 
+## Extension interop
+
+The queue publishes its state for peer extensions on the shared `pi.events` bus:
+
+- **Event** — `queue-steer:state`, emitted on every change to `{ pending, paused, blocked }`. `pending` counts all rows still held by the queue (both lanes, including paused and edit-held rows), `paused` means dispatch is paused, `blocked` means a control row (`/compact`, `/model`, `/new`, `/reload`, `/fabric prewalk`) is executing.
+- **Mirror** — the same snapshot lives on `globalThis.__tmustierPiQueueSteerState` for synchronous reads, immune to extension load order, and survives `/reload` runtime swaps.
+
+Consumers: [pi-ledger](https://github.com/inloopstudio-team/pi-ledger) ≥ 0.6.0 holds back its no-credit engagement wizard while `pending > 0`, so a parked backlog no longer triggers the billing prompt, and re-offers it once the backlog drains without starting a run.
+
 ## Development
 
 ```bash

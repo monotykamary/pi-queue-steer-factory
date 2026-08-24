@@ -31,6 +31,20 @@ const QUEUE_STEER_FEATURE = "queue-steer";
 const NEXT_ROW_KEY = "alt+down";
 const SUBMIT_GUARD = Symbol.for("@tmustier/pi-queue-steer.submit-guard");
 
+/** Interop channel for peer extensions (e.g. pi-ledger, which defers its
+ *  no-credit engagement wizard while the queue parks undispatched rows). The
+ *  latest snapshot is emitted on pi.events under this name on every change. */
+export const QUEUE_STEER_STATE_EVENT = "queue-steer:state";
+
+export interface QueueSteerState {
+	/** Rows still held by the queue — both lanes, including paused/held rows. */
+	pending: number;
+	/** Dispatch paused (aborted turn, failed preparation, or manual pause). */
+	paused: boolean;
+	/** A blocking control row (/compact, /model, /new, /reload, prewalk) is executing. */
+	blocked: boolean;
+}
+
 /** Queue state parked on globalThis across Pi's in-process runtime swaps. */
 interface RuntimeStash {
 	reason?: "reload" | "new";
@@ -40,6 +54,9 @@ interface RuntimeStash {
 declare global {
 	// Keep the legacy key so an update from pi-queue-steer 0.3.x cannot lose rows.
 	var __tmustierPiQueueSteerReloadStash: RuntimeStash | undefined;
+	/** Latest published queue snapshot, mirrored for synchronous interop reads
+	 *  (immune to extension load / listener registration order). */
+	var __tmustierPiQueueSteerState: QueueSteerState | undefined;
 }
 const DRAIN_COMMAND = "queue-drain";
 const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
@@ -425,9 +442,28 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		];
 	};
 
+	// Publish the queue snapshot on every render (the choke point all queue,
+	// pause, and blocking-activity mutations funnel through). Mirrored on
+	// globalThis for synchronous reads, emitted on pi.events on change only.
+	let lastBroadcastKey = "";
+	const broadcastQueueState = (): void => {
+		const state: QueueSteerState = {
+			pending: queue.length,
+			paused,
+			blocked: blockingActivity !== undefined,
+		};
+		globalThis.__tmustierPiQueueSteerState = state;
+		const key = `${state.pending}:${state.paused}:${state.blocked}`;
+		if (key === lastBroadcastKey) return;
+		lastBroadcastKey = key;
+		pi.events.emit(QUEUE_STEER_STATE_EVENT, state);
+	};
+	broadcastQueueState();
+
 	const renderQueue = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
 		if (queue.length === 0) paused = false;
+		broadcastQueueState();
 		if (ctx.mode !== "tui" || queue.length === 0) {
 			ctx.ui.setWidget(WIDGET_ID, undefined);
 			return;
@@ -716,6 +752,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 	const startCompaction = (ctx: ExtensionContext, instructions: string | undefined): boolean => {
 		blockingActivity = "compact";
+		broadcastQueueState();
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		try {
@@ -731,6 +768,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return true;
 		} catch (error) {
 			blockingActivity = undefined;
+			broadcastQueueState();
 			ctx.ui.notify(
 				`Could not start compaction: ${error instanceof Error ? error.message : String(error)}`,
 				"error",
