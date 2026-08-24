@@ -1,6 +1,6 @@
 {
   "name": "@monotykamary/pi-queue-steer",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Visible steering and follow-up queues with inline editing for Pi.",
   "type": "module",
   "license": "MIT",
