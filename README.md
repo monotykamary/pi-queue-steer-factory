@@ -1,9 +1,9 @@
-# pi-queue-steer
+# pi-queue-steer-factory
 
-[![CI](https://github.com/monotykamary/pi-queue-steer/actions/workflows/ci.yml/badge.svg)](https://github.com/monotykamary/pi-queue-steer/actions/workflows/ci.yml)
+[![CI](https://github.com/monotykamary/pi-queue-steer-factory/actions/workflows/ci.yml/badge.svg)](https://github.com/monotykamary/pi-queue-steer-factory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A visible steering and follow-up timeline for [Pi](https://github.com/earendil-works/pi-mono).
+A visible steering, follow-up, and session-control timeline for [Pi](https://github.com/earendil-works/pi-mono), with acknowledged [`/fabric prewalk`](https://github.com/monotykamary/pi-fabric) barriers.
 
 Queue instructions while the agent works. Steering stays in a blue next-turn box. Follow-ups stay in a yellow after-this-run box beneath it. Both lanes remain independent first-in, first-out queues and keep Pi’s delivery timing.
 
@@ -15,25 +15,27 @@ Move into any row to edit it. The selected row becomes the live Pi editor, with 
 
 ## Install
 
-Install the latest version from GitHub:
+Install the queue and Pi Fabric from npm:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer
+pi install npm:pi-queue-steer-factory
+pi install npm:pi-fabric
 ```
 
-Pin the current release:
+Pin the current releases when you want reproducible installs:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer@v0.3.0
+pi install npm:pi-queue-steer-factory@0.4.0
+pi install npm:pi-fabric@0.62.7
+```
+
+The GitHub package is also installable directly:
+
+```bash
+pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.4.0
 ```
 
 Then start a new Pi session or run `/reload`.
-
-Try a local checkout for one session:
-
-```bash
-pi -e ./index.ts
-```
 
 ## Controls
 
@@ -55,7 +57,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Empty composer, follow-up queued | `Enter` | Promote the oldest follow-up to steering now |
 | Queue paused after an abort | `Enter` | Resume from the next steering row, or the next follow-up |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
-| Agent stopped | `Option+Enter` | Queue the message (or a skill/template command) visibly, paused; `Enter` keeps Pi's immediate send |
+| Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, or `/fabric prewalk` visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
 
 `Option+Down`, `Option+X`, `Option+T` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
@@ -76,29 +78,48 @@ The extension hands messages back to Pi’s native queues only when their delive
 
 ## Queueing while stopped
 
-With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations such as `/bro simplify this`, which stay short and editable, then autoexpand when the row sends. Press `Enter` on the empty composer to send the next queued row, or `Option+Up` to edit it first.
+With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, and exact `/fabric prewalk` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
 
-Pi's built-ins still run immediately — a stopped `/compact` or `/reload` executes at once (see command rows) — and extension commands, unknown slash input and `!` bash pass straight through.
+A plain `Enter` still runs every command immediately. With `Option+Enter`, other Pi built-ins, other extension commands, unknown slash input and `!` bash keep passing straight through.
 
 ## Prompt templates and Agent Skills
 
 Queued `/do-less this code`, `/skill:bro` and `/bro` rows stay short and editable, then expand when delivered — while the agent works they queue through steering or follow-up input, and while stopped `Option+Enter` parks them paused like any message. `/bro` is shorthand for `/skill:bro` unless a built-in, prompt or extension already uses that name. Template arguments and images are preserved; unknown slash input remains ordinary text.
 
-Pi cannot invoke arbitrary commands through its public extension API. `/compact` and `/reload` are the supported built-ins. A queued extension command pauses delivery until you edit or remove it.
+Arbitrary commands are intentionally not replayed. The supported command rows have explicit completion signals; an unsupported queued extension command pauses until you edit or remove it.
 
 ## Command rows
 
-Text-only rows whose text is exactly `/compact`, `/compact <instructions>` or `/reload` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the Pi command instead of becoming an LLM message:
+Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, or exact `/fabric prewalk` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
 
-- `Option+Enter` while the agent works queues the command in follow-up order
-- a command row executes only once the agent is idle; rows behind it wait — so `/compact` followed by `continue` compacts first and delivers `continue` after compaction completes
-- `/reload` runs Pi’s built-in reload; committed rows queued behind it retain their IDs, lanes, attachments and pause state across the runtime swap
+- `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, and `/fabric prewalk` paused
+- a command row executes only once the agent is idle; rows behind it wait
+- `/model provider/model` resolves an exact available model; bare or non-exact `/model` opens a filtered picker, and cancellation or authentication failure restores and pauses the row
+- exact `/fabric prewalk` waits for Pi Fabric to acknowledge that prewalk is armed before the next row can run; it requires Pi Fabric 0.62.7 or newer
+- `/new` starts a fresh session and transfers its committed tail to that replacement runtime without adding rows to either transcript; the tail continues automatically, while reopening a persisted queue still starts paused
+- `/reload` runs Pi’s built-in reload; committed trailing rows retain their IDs, lanes, attachments and pause state across the runtime swap
 - idle `/compact` uses Pi’s public compaction API so queued rows resume when compaction finishes; a start failure restores and pauses the command row
-- `/reload` submitted while the agent works or tracked compaction runs stays queued instead of showing Pi’s built-in wait warning
-- `Enter` on `/compact` while the agent works uses Pi’s public compaction API and holds visible rows until compaction settles
-- ordinary messages submitted during compaction remain in Pi’s native queue and can run before extension-owned command rows after compaction finishes
-- `Option+Enter` on a command while the agent is idle executes it immediately instead of sending the text to the model
-- command rows show a `⚙` marker and pause, resume and edit like any other row; editing a row into or out of command form just works
+- `/reload` submitted while the agent works or tracked compaction runs stays queued instead of showing Pi's built-in wait warning
+- `Enter` on `/compact` while the agent works uses Pi's public compaction API and holds visible rows until compaction settles
+- ordinary messages submitted during compaction remain in Pi's native queue and can run before extension-owned command rows after compaction finishes
+- stopped `Option+Enter` still executes `/compact` and `/reload` immediately; only the new Factory controls park paused
+- unsupported command forms, including `/fabric prewalk <task>`, are not control rows; queue exact `/fabric prewalk` and the task as separate rows
+- command rows show a `⚙` marker and keep the same pause, edit, reorder and snapshot semantics as messages
+
+## Factory pipelines
+
+A linear Factory run is just an observed queue of controls followed by work:
+
+```text
+/new
+/model openai/gpt-5.4
+/fabric prewalk
+Implement the queued task
+```
+
+Queue each line with `Option+Enter`, then press `Enter` on the empty composer. The dispatcher waits for session replacement, model selection and prewalk arming before advancing; later controls wait for Pi's `agent_settled` idle boundary. A failed or cancelled control remains at the front and pauses the whole tail, so it can be edited or retried without reordering.
+
+Fabric remains the execution plane inside the task: it can launch durable or recursive agents, steer them, and create isolated worktrees. This extension owns only the visible deterministic queue and its observation boundaries; it does not introduce another agent loop.
 
 ## Draining the queue
 
@@ -107,7 +128,7 @@ Text-only rows whose text is exactly `/compact`, `/compact <instructions>` or `/
 - during a run, the combined message reaches Pi as one steering message
 - while stopped, the combined message starts a new run directly
 - a mid-turn drain lands inside the in-flight call's context when the turn has not responded yet, or as the next steering turn once it has — either way the transcript records the combined message exactly once
-- command rows are not messages: `/compact` and `/reload` rows stay queued and still execute once the agent is idle
+- command rows are not messages: `/compact`, `/reload`, `/new`, `/model`, and `/fabric prewalk` stay queued and execute at their control boundaries
 - an active row-editing session refuses the drain, so rows are never pulled away mid-draft
 - a synchronous hand-off failure restores every row, in order, and pauses the queue
 
@@ -133,13 +154,13 @@ Aborting a run pauses both visible lanes. This prevents a follow-up from startin
 
 Press `Enter` on the empty composer to resume; the same keypress sends rows queued while stopped. A synchronous handoff or preflight failure returns the affected batch to the front of its lane.
 
-Committed rows also survive quitting and resuming Pi. On shutdown the extension records the queue in the session file as an invisible custom entry that stays out of the transcript and out of the model context. Reopening that session restores the rows **paused**: nothing sends until you press `Enter` on the empty composer. A `/reload` runtime swap still carries committed rows and pause state through a short in-process handoff. Edit drafts stay session-local and never persist; `/new` starts clean and forks do not inherit rows.
+Committed rows also survive quitting and resuming Pi. On shutdown the extension records the queue in the session file as an invisible custom entry that stays out of the transcript and out of the model context. Reopening that session restores the rows **paused**: nothing sends until you press `Enter` on the empty composer. A `/reload` runtime swap still carries committed rows and pause state through a short in-process handoff. Edit drafts stay session-local and never persist; ordinary `/new` and forks start clean, while queued `/new` intentionally transfers its committed tail.
 
 ## Public API limits
 
-Pi’s public `sendUserMessage` API is fire-and-forget. The extension restores synchronous dispatch failures and preflight/expansion failures without reordering, but Pi does not expose later asynchronous input rejection to extensions. Inferring rejection from queue timing could duplicate a delayed successful handoff, so the extension does not do that.
+Pi’s public `sendUserMessage` API is fire-and-forget. The extension restores synchronous message-dispatch failures and preflight/expansion failures without reordering, but Pi does not expose later asynchronous input rejection. Inferring rejection from queue timing could duplicate a delayed successful handoff, so the extension does not do that.
 
-Pi also exposes queued `/reload` only through the TUI editor’s `void` submit callback. The extension prevents known busy and compaction conflicts and restores trailing rows on a successful runtime swap, but Pi cannot acknowledge or reject that submit back to the extension.
+Queued `/model` uses Pi's awaited model API. Queued `/new` runs through an internal extension-command adapter because `newSession()` is intentionally available only in command contexts. Queued `/fabric prewalk` uses Pi Fabric's versioned host-local request/ack protocol. `/reload` remains the one supported control exposed only through the TUI editor's `void` submit callback, so Pi cannot acknowledge or reject that submit back to the extension.
 
 If an `all`-mode lane stays pinned until the agent settles, saving from idle starts the new run with the lane head, then delivers the remaining rows in FIFO order at the next native boundary. The public API has no atomic idle-to-native-queue batch operation, so this restart cannot be one native batch. Draining sidesteps that limit by composing its combined message client-side, so one send carries every row.
 
@@ -147,11 +168,11 @@ If an `all`-mode lane stays pinned until the agent settles, saving from idle sta
 
 Queuing a row does not send it. When Pi shuts down cleanly — `/quit`, Ctrl+C, Ctrl+D, or a session switch — the extension records the committed queue as a custom session entry (`pi-queue-steer:queue`), invisible in the transcript and excluded from the model context. When the same session is reopened (`pi -c`, `pi -r`, `pi --session`, `/resume`), the rows come back in FIFO order with their IDs, lanes, image attachments and command rows intact — and the queue is parked paused. Press `Enter` on the empty composer to send the next row, or `Option+Up` to edit it first.
 
-Rows belong to the session they were queued in. `/new` and `/fork` start with an empty queue. Older snapshots superseded by later ones stay in the session file but are never restored, and a session can only be resumed at all if Pi wrote it: sessions without an assistant response are not persisted by Pi, and a hard kill skips the shutdown hook.
+Rows normally belong to the session they were queued in. `/fork` and an ordinary immediate `/new` start with an empty queue. A **queued** `/new` is the explicit exception: it retires the old session snapshot, transfers its tail in process, and continues that tail in the replacement session. Older snapshots superseded by later ones stay in session files but are never restored, and a session can only be resumed at all if Pi wrote it: sessions without an assistant response are not persisted by Pi, and a hard kill skips the shutdown hook.
 
 ## Editor composition
 
-pi-queue-steer wraps the active Pi editor. It does not replace Pi’s input model.
+pi-queue-steer-factory wraps the active Pi editor. It does not replace Pi’s input model.
 
 For display, it extracts the live editor’s text and cursor from the editor frame. It then places that content inside the selected queue row. Autocomplete remains below the edited text.
 

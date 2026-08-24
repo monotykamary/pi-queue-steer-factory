@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 - 2026-08-25
+
+### Added
+
+- Queue text-only `/new`, `/model [target]`, and exact `/fabric prewalk` as first-class idle control rows alongside `/compact` and `/reload`.
+- Resolve exact queued model targets through Pi's public model catalogue, with an interactive picker for bare or non-exact targets and restoration on cancellation or authentication failure.
+- Wait for Pi Fabric's versioned prewalk request/ack protocol before delivering the next row; failed or unavailable prewalk restores its row and pauses the tail.
+- Transfer the committed tail of a queued `/new` into the replacement session and continue it automatically, while writing an empty old-session snapshot so a later resume cannot duplicate moved work.
+- Add deterministic tests for the full `/new` → `/model` → `/fabric prewalk` → task pipeline.
+
+### Changed
+
+- Rename the fork and npm package to unscoped `pi-queue-steer-factory`.
+- Keep arbitrary built-ins, extension commands, unknown slash input and bash native; only the explicitly supported controls are queueable while stopped.
+
 ## 0.3.0 - 2026-08-21
 
 ### Added

@@ -1,7 +1,7 @@
 {
-  "name": "@monotykamary/pi-queue-steer",
-  "version": "0.3.1",
-  "description": "Visible steering and follow-up queues with inline editing for Pi.",
+  "name": "pi-queue-steer-factory",
+  "version": "0.4.0",
+  "description": "Visible steering, follow-up, and session-control queues for Pi and Pi Fabric.",
   "type": "module",
   "license": "MIT",
   "author": "Thomas Mustier",
@@ -9,19 +9,23 @@
     "pi-package",
     "pi-extension",
     "queue",
+    "factory",
+    "pi-fabric",
+    "orchestration",
     "steering",
     "follow-up",
     "tui"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/monotykamary/pi-queue-steer.git"
+    "url": "git+https://github.com/monotykamary/pi-queue-steer-factory.git"
   },
-  "bugs": "https://github.com/monotykamary/pi-queue-steer/issues",
-  "homepage": "https://github.com/monotykamary/pi-queue-steer",
+  "bugs": "https://github.com/monotykamary/pi-queue-steer-factory/issues",
+  "homepage": "https://github.com/monotykamary/pi-queue-steer-factory",
   "files": [
     "index.ts",
     "editor-render.ts",
+    "fabric-prewalk.ts",
     "queue-state.ts",
     "queued-input.ts",
     "queue-persistence.ts",
@@ -39,7 +43,8 @@
   "pi": {
     "extensions": [
       "index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/monotykamary/pi-queue-steer-factory/main/assets/pi-queue-steer-demo.gif"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
