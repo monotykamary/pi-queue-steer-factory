@@ -12,6 +12,20 @@ test("parses /compact with and without instructions", () => {
 	assert.deepEqual(parseQueuedCommand("/compact   "), { kind: "compact" });
 });
 
+test("parses Factory control rows exactly", () => {
+	assert.deepEqual(parseQueuedCommand("/new"), { kind: "new" });
+	assert.deepEqual(parseQueuedCommand(" /model "), { kind: "model" });
+	assert.deepEqual(parseQueuedCommand("/model openai/gpt-5.4"), {
+		kind: "model",
+		target: "openai/gpt-5.4",
+	});
+	assert.deepEqual(parseQueuedCommand("/fabric prewalk"), { kind: "fabric-prewalk" });
+	assert.deepEqual(parseQueuedCommand("/fabric   prewalk"), { kind: "fabric-prewalk" });
+	assert.equal(parseQueuedCommand("/new now"), undefined);
+	assert.equal(parseQueuedCommand("/fabric prewalk implement this"), undefined);
+	assert.equal(parseQueuedCommand("/fabric status"), undefined);
+});
+
 test("parses /reload exactly", () => {
 	assert.deepEqual(parseQueuedCommand("/reload"), { kind: "reload" });
 	assert.deepEqual(parseQueuedCommand(" /reload "), { kind: "reload" });
@@ -21,7 +35,7 @@ test("parses /reload exactly", () => {
 test("does not treat messages or other commands as command rows", () => {
 	assert.equal(parseQueuedCommand("continue"), undefined);
 	assert.equal(parseQueuedCommand("/compactor settings"), undefined);
-	assert.equal(parseQueuedCommand("/model"), undefined);
+	assert.equal(parseQueuedCommand("/settings"), undefined);
 	assert.equal(parseQueuedCommand("please /compact later"), undefined);
 	assert.equal(parseQueuedCommand(""), undefined);
 });

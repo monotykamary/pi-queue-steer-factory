@@ -1,10 +1,12 @@
 export type QueueLane = "steer" | "followUp";
 
 /** A queued row that executes a Pi command instead of becoming an LLM message. */
-export interface QueuedCommand {
-	kind: "compact" | "reload";
-	instructions?: string;
-}
+export type QueuedCommand =
+	| { kind: "compact"; instructions?: string }
+	| { kind: "reload" }
+	| { kind: "new" }
+	| { kind: "model"; target?: string }
+	| { kind: "fabric-prewalk" };
 
 /**
  * Parse row text as a queueable command. Commands are recognised at dispatch
@@ -13,6 +15,13 @@ export interface QueuedCommand {
 export function parseQueuedCommand(text: string): QueuedCommand | undefined {
 	const trimmed = text.trim();
 	if (trimmed === "/reload") return { kind: "reload" };
+	if (trimmed === "/new") return { kind: "new" };
+	if (trimmed === "/model") return { kind: "model" };
+	if (trimmed.startsWith("/model ")) {
+		const target = trimmed.slice("/model ".length).trim();
+		return { kind: "model", target: target || undefined };
+	}
+	if (/^\/fabric\s+prewalk$/.test(trimmed)) return { kind: "fabric-prewalk" };
 	if (trimmed === "/compact") return { kind: "compact" };
 	if (trimmed.startsWith("/compact ")) {
 		const instructions = trimmed.slice("/compact ".length).trim();

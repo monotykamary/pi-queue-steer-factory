@@ -71,6 +71,11 @@ export function persistQueueSnapshot(
 	pi.appendEntry(QUEUE_SNAPSHOT_TYPE, queueSnapshotOf(rows, paused));
 }
 
+/** Supersede an older snapshot after its rows move to a different Pi session. */
+export function persistQueueTombstone(pi: ExtensionAPI): void {
+	pi.appendEntry(QUEUE_SNAPSHOT_TYPE, queueSnapshotOf([], true));
+}
+
 /**
  * The newest restorable queue snapshot on the session branch. The branch
  * walks from root to leaf, so the last owned custom entry is the most recent

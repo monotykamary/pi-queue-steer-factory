@@ -7,6 +7,7 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { SessionManager, type CompactOptions, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { FABRIC_PREWALK_REQUEST_EVENT } from "../fabric-prewalk.ts";
 import queueSteerExtension from "../index.ts";
 import { isQueueSnapshot, latestQueueSnapshot, queueSnapshotOf, QUEUE_SNAPSHOT_TYPE } from "../queue-persistence.ts";
 import { DeliveryQueue, isQueueableSubmission, QueueEditSession, type QueueLane } from "../queue-state.ts";
@@ -246,6 +247,10 @@ function createHarness(options: {
 	compactStartError?: Error;
 	autocompleteVisible?: boolean;
 	sessionEntries?: unknown[];
+	models?: Array<{ provider: string; id: string; name?: string }>;
+	selectResult?: string;
+	setModelResult?: boolean | Error;
+	newSession?: () => Promise<{ cancelled: boolean }>;
 } = {}) {
 	type Handler = (event: any, context: any) => any;
 	const handlers = new Map<string, Handler[]>();
@@ -255,6 +260,10 @@ function createHarness(options: {
 	const compactCalls: CompactOptions[] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
+	const selectedModels: Array<{ provider: string; id: string }> = [];
+	const selections: Array<{ title: string; options: string[] }> = [];
+	const eventHandlers = new Map<string, Set<(value: unknown) => void>>();
+	let newSessionCalls = 0;
 	let idle = false;
 	let pending = false;
 	let aborted = false;
@@ -296,6 +305,10 @@ function createHarness(options: {
 		notify(message: string, level: string) {
 			notifications.push({ message, level });
 		},
+		async select(title: string, choices: string[]) {
+			selections.push({ title, options: [...choices] });
+			return options.selectResult;
+		},
 	};
 
 	const mode = options.mode ?? "tui";
@@ -304,6 +317,8 @@ function createHarness(options: {
 		hasUI: mode === "tui" || mode === "rpc",
 		cwd: options.cwd ?? DEFAULT_TEST_CWD,
 		ui,
+		scopedModels: [],
+		modelRegistry: { getAvailable: () => options.models ?? [] },
 		isIdle: () => idle,
 		isProjectTrusted: () => options.projectTrusted ?? true,
 		hasPendingMessages: () => pending,
@@ -314,21 +329,51 @@ function createHarness(options: {
 			if (options.compactStartError) throw options.compactStartError;
 			compactCalls.push(compactOptions);
 		},
+		async newSession() {
+			newSessionCalls += 1;
+			return options.newSession?.() ?? { cancelled: false };
+		},
 		sessionManager: {
 			getBranch: (): unknown[] => options.sessionEntries ?? [],
 		},
 	};
 
+	const events = {
+		emit(channel: string, value: unknown) {
+			for (const handler of eventHandlers.get(channel) ?? []) handler(value);
+		},
+		on(channel: string, handler: (value: unknown) => void) {
+			const registered = eventHandlers.get(channel) ?? new Set<(value: unknown) => void>();
+			registered.add(handler);
+			eventHandlers.set(channel, registered);
+			return () => registered.delete(handler);
+		},
+	};
+
 	const pi = {
+		events,
 		on(name: string, handler: Handler) {
 			const registered = handlers.get(name) ?? [];
 			registered.push(handler);
 			handlers.set(name, registered);
 		},
 		sendUserMessage(content: unknown, sendOptions?: unknown) {
+			const invocation = typeof content === "string" && (sendOptions as { expandPromptTemplates?: boolean } | undefined)?.expandPromptTemplates
+				? /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(content)
+				: undefined;
+			const registered = invocation ? registeredCommands.get(invocation[1] ?? "") : undefined;
+			if (registered) {
+				queueMicrotask(() => void registered.handler(invocation?.[2] ?? "", context));
+				return;
+			}
 			if (options.sendFailureAt === sent.length + 1) throw new Error("synthetic send failure");
 			sent.push({ content, options: sendOptions });
 			if (sendOptions) pending = true;
+		},
+		async setModel(model: { provider: string; id: string }) {
+			if (options.setModelResult instanceof Error) throw options.setModelResult;
+			selectedModels.push(model);
+			return options.setModelResult ?? true;
 		},
 		getCommands: () => options.commands ?? [],
 		appendEntry(customType: string, data?: unknown): void {
@@ -359,6 +404,9 @@ function createHarness(options: {
 		compactCalls,
 		notifications,
 		appendedEntries,
+		selectedModels,
+		selections,
+		events,
 		async runCommand(name: string, args = "") {
 			const command = registeredCommands.get(name);
 			assert.ok(command, `expected /${name} to be registered`);
@@ -378,6 +426,9 @@ function createHarness(options: {
 		},
 		get aborted() {
 			return aborted;
+		},
+		get newSessionCalls() {
+			return newSessionCalls;
 		},
 		setIdle(value: boolean) {
 			idle = value;
@@ -1031,6 +1082,141 @@ test("an expansion failure restores and pauses an entire all-mode batch", async 
 	}
 });
 
+test("changes model before delivering the next queued message", async () => {
+	const harness = createHarness({
+		models: [
+			{ provider: "anthropic", id: "other" },
+			{ provider: "openai", id: "gpt-5.4", name: "GPT 5.4" },
+		],
+	});
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/model openai/gpt-5.4");
+	await enqueue(harness, "followUp", "after model");
+
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.sent.length === 1);
+	assert.deepEqual(harness.selectedModels, [{ provider: "openai", id: "gpt-5.4", name: "GPT 5.4" }]);
+	assert.equal(harness.selections.length, 0);
+	assert.equal(harness.sent[0]?.content, "after model");
+});
+
+test("keeps a cancelled model row and pauses delivery", async () => {
+	const harness = createHarness({
+		models: [{ provider: "openai", id: "gpt-5.4" }],
+	});
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/model");
+	await enqueue(harness, "followUp", "held after picker");
+
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.notifications.some(({ message }) => message.includes("model selection cancelled")));
+	assert.match(renderWidget(harness), /\/model/);
+	assert.match(renderWidget(harness), /held after picker/);
+	assert.match(renderWidget(harness), /paused/);
+	assert.equal(harness.sent.length, 0);
+});
+
+test("waits for Pi Fabric to acknowledge prewalk before delivering the task", async () => {
+	const harness = createHarness();
+	let respond: ((result: { ok: true } | { ok: false; error: string }) => void) | undefined;
+	harness.events.on(FABRIC_PREWALK_REQUEST_EVENT, (value) => {
+		const request = value as {
+			claim: () => boolean;
+			respond: (result: { ok: true } | { ok: false; error: string }) => void;
+		};
+		assert.equal(request.claim(), true);
+		respond = request.respond;
+	});
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/fabric prewalk");
+	await enqueue(harness, "followUp", "after prewalk");
+
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+	assert.ok(respond);
+	respond({ ok: true });
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "after prewalk");
+});
+
+test("restores and pauses prewalk when no compatible Fabric listener exists", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/fabric prewalk");
+	await enqueue(harness, "followUp", "must stay held");
+
+	await harness.emit("agent_settled");
+	const rendered = renderWidget(harness);
+	assert.match(rendered, /\/fabric prewalk/);
+	assert.match(rendered, /must stay held/);
+	assert.match(rendered, /paused/);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /requires pi-fabric 0\.62\.7/);
+});
+
+test("carries a queued new-session tail through model, prewalk, and task dispatch", async () => {
+	let resolveNewSession: ((result: { cancelled: boolean }) => void) | undefined;
+	const newSession = new Promise<{ cancelled: boolean }>((resolve) => {
+		resolveNewSession = resolve;
+	});
+	const first = createHarness({ newSession: () => newSession });
+	try {
+		await first.emit("session_start", { reason: "startup" });
+		first.setIdle(true);
+		for (const text of [
+			"/new",
+			"/model openai/gpt-5.4",
+			"/fabric prewalk",
+			"factory task",
+		]) {
+			await enqueue(first, "followUp", text);
+		}
+		await first.emit("agent_settled");
+		await waitFor(() => first.newSessionCalls === 1);
+		await first.emit("session_shutdown", { reason: "new" });
+		assert.equal(first.appendedEntries.length, 1);
+		const tombstone = first.appendedEntries[0]?.data;
+		assert.ok(isQueueSnapshot(tombstone));
+		assert.deepEqual(tombstone.rows, []);
+		resolveNewSession?.({ cancelled: false });
+
+		const second = createHarness({
+			models: [{ provider: "openai", id: "gpt-5.4" }],
+		});
+		second.events.on(FABRIC_PREWALK_REQUEST_EVENT, (value) => {
+			const request = value as { claim: () => boolean; respond: (result: { ok: true }) => void };
+			if (request.claim()) request.respond({ ok: true });
+		});
+		second.setIdle(true);
+		await second.emit("session_start", { reason: "new" });
+		await waitFor(() => second.sent.length === 1);
+
+		assert.deepEqual(second.selectedModels, [{ provider: "openai", id: "gpt-5.4" }]);
+		assert.equal(second.sent[0]?.content, "factory task");
+		assert.match(second.notifications[0]?.message ?? "", /Restored 3 queued rows after new/);
+		await second.emit("session_shutdown", { reason: "quit" });
+	} finally {
+		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
+	}
+});
+
+test("keeps and pauses `/new` when session creation is cancelled", async () => {
+	const harness = createHarness({ newSession: async () => ({ cancelled: true }) });
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/new");
+	await enqueue(harness, "followUp", "still here");
+
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.notifications.some(({ message }) => message.includes("new session cancelled")));
+	assert.match(renderWidget(harness), /\/new/);
+	assert.match(renderWidget(harness), /still here/);
+	assert.match(renderWidget(harness), /paused/);
+});
+
 test("keeps reload runnable when compact aborts a preflight prompt", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
@@ -1380,6 +1566,24 @@ test("queues Option+Enter submissions while stopped and sends on empty Enter", a
 	]);
 });
 
+test("parks Factory control commands on stopped Option+Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	for (const text of ["/new", "/model openai/gpt-5.4", "/fabric prewalk"]) {
+		harness.editor.setText(text);
+		harness.editor.handleInput("alt-enter");
+	}
+
+	const rendered = renderWidget(harness);
+	assert.match(rendered, /follow-ups \(3\) · paused/);
+	assert.match(rendered, /\/new/);
+	assert.match(rendered, /\/model openai\/gpt-5\.4/);
+	assert.match(rendered, /\/fabric prewalk/);
+	assert.equal(harness.sent.length, 0);
+});
+
 test("plain Enter, slash text and bash pass straight through while stopped", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
@@ -1390,9 +1594,9 @@ test("plain Enter, slash text and bash pass straight through while stopped", asy
 	assert.equal(harness.editor.getText(), "send me now");
 	assert.equal(harness.widget, undefined);
 
-	harness.editor.setText("/model");
+	harness.editor.setText("/settings");
 	harness.editor.handleInput("alt-enter");
-	assert.equal(harness.editor.getText(), "/model");
+	assert.equal(harness.editor.getText(), "/settings");
 	assert.equal(harness.widget, undefined);
 
 	harness.editor.setText("!git status");

@@ -1,18 +1,20 @@
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import {
 	CustomEditor,
 	keyText,
 	SettingsManager,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	type Theme,
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth, type Component, type EditorComponent } from "@earendil-works/pi-tui";
 import { extractInlineEditorLines } from "./editor-render.ts";
+import { requestFabricPrewalk } from "./fabric-prewalk.ts";
 import { expandQueuedInput, isExpandableSlashCommand, queuesDuringCompaction } from "./queued-input.ts";
-import { latestQueueSnapshot, persistQueueSnapshot } from "./queue-persistence.ts";
+import { latestQueueSnapshot, persistQueueSnapshot, persistQueueTombstone } from "./queue-persistence.ts";
 import {
 	DeliveryQueue,
 	isQueueableSubmission,
@@ -29,15 +31,18 @@ const QUEUE_STEER_FEATURE = "queue-steer";
 const NEXT_ROW_KEY = "alt+down";
 const SUBMIT_GUARD = Symbol.for("@tmustier/pi-queue-steer.submit-guard");
 
-/** Queue state parked on globalThis across Pi's in-process runtime swap. */
-interface ReloadStash {
+/** Queue state parked on globalThis across Pi's in-process runtime swaps. */
+interface RuntimeStash {
+	reason?: "reload" | "new";
 	paused: boolean;
 	rows: QueuedMessage<ImageContent>[];
 }
 declare global {
-	var __tmustierPiQueueSteerReloadStash: ReloadStash | undefined;
+	// Keep the legacy key so an update from pi-queue-steer 0.3.x cannot lose rows.
+	var __tmustierPiQueueSteerReloadStash: RuntimeStash | undefined;
 }
 const DRAIN_COMMAND = "queue-drain";
+const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
 const REMOVE_ROW_KEY = "alt+x";
 const TOGGLE_LANE_KEY = "alt+t";
 const REORDER_UP_KEY = "alt+shift+up";
@@ -254,6 +259,52 @@ function mergedDrainContent(items: readonly QueuedMessage<ImageContent>[]): stri
 	return [{ type: "text", text }, ...images];
 }
 
+function commandLabel(command: QueuedCommand): string {
+	switch (command.kind) {
+		case "compact": return "/compact";
+		case "reload": return "/reload";
+		case "new": return "/new";
+		case "model": return "/model";
+		case "fabric-prewalk": return "/fabric prewalk";
+	}
+}
+
+function queuesWhileStopped(command: QueuedCommand | undefined): boolean {
+	return command?.kind === "new" || command?.kind === "model" || command?.kind === "fabric-prewalk";
+}
+
+function availableModels(context: ExtensionContext): Model<Api>[] {
+	const source = context.scopedModels.length > 0
+		? context.scopedModels.map((scoped) => scoped.model)
+		: context.modelRegistry.getAvailable();
+	const unique = new Map<string, Model<Api>>();
+	for (const model of source) unique.set(`${model.provider}/${model.id}`, model);
+	return [...unique.values()];
+}
+
+function exactModel(reference: string, models: readonly Model<Api>[]): Model<Api> | undefined {
+	const target = reference.trim();
+	const separator = target.indexOf("/");
+	if (separator > 0) {
+		const provider = target.slice(0, separator);
+		const id = target.slice(separator + 1);
+		return models.find((model) => model.provider === provider && model.id === id);
+	}
+	const matches = models.filter((model) => model.id === target);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
+function modelChoices(search: string | undefined, models: readonly Model<Api>[]): string[] {
+	const query = search?.trim().toLowerCase();
+	return models
+		.filter((model) => {
+			if (!query) return true;
+			return `${model.provider}/${model.id} ${model.name ?? ""}`.toLowerCase().includes(query);
+		})
+		.map((model) => `${model.provider}/${model.id}`)
+		.sort((left, right) => left.localeCompare(right));
+}
+
 function itemCommand(item: Pick<QueuedMessage<ImageContent>, "text" | "images">): QueuedCommand | undefined {
 	// Treat an image-bearing row as a message so executing a command can never
 	// silently discard its attachments.
@@ -268,11 +319,13 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let editorInstallTimer: ReturnType<typeof setTimeout> | undefined;
 	let baseEditorFactory: EditorFactory | undefined;
 	let baseEditorFactoryCaptured = false;
-	let reloadSubmitTimer: ReturnType<typeof setTimeout> | undefined;
+	let commandSubmitTimer: ReturnType<typeof setTimeout> | undefined;
 	let renderingInline = false;
 	let paused = false;
 	let settingsManager: SettingsManager | undefined;
-	let blockingActivity: "compact" | "auto-compact" | "reload" | undefined;
+	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | undefined;
+	let pendingNewRowId: string | undefined;
+	let plannedNewSession = false;
 	let compactionFinishTimer: ReturnType<typeof setTimeout> | undefined;
 	let nativeCompactionInputQueued = false;
 	let nativeCompactionTurnStarted = false;
@@ -455,12 +508,117 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return deliverBatchToNativeQueue(ctx, lane, items);
 	};
 
+	const pauseControlCommand = (
+		ctx: ExtensionContext,
+		item: QueuedMessage<ImageContent>,
+		activity: "new" | "model" | "fabric-prewalk",
+		error: unknown,
+	): void => {
+		if (blockingActivity !== activity || !queue.get(item.id)) return;
+		blockingActivity = undefined;
+		if (activity === "new") {
+			pendingNewRowId = undefined;
+			plannedNewSession = false;
+		}
+		paused = true;
+		renderQueue(ctx);
+		const command = itemCommand(item);
+		ctx.ui.notify(
+			`Could not run queued ${command ? commandLabel(command) : item.text.trim()}; queue paused: ${error instanceof Error ? error.message : String(error)}`,
+			"error",
+		);
+	};
+
+	const finishControlCommand = (
+		ctx: ExtensionContext,
+		item: QueuedMessage<ImageContent>,
+		activity: "model" | "fabric-prewalk",
+	): void => {
+		if (blockingActivity !== activity || !queue.get(item.id)) return;
+		queue.remove(item.id);
+		blockingActivity = undefined;
+		paused = false;
+		renderQueue(ctx);
+		if (!editSession && queue.length > 0 && ctx.isIdle()) dispatchFromIdle(ctx);
+	};
+
+	const executeModelRow = (ctx: ExtensionContext, item: QueuedMessage<ImageContent>, command: Extract<QueuedCommand, { kind: "model" }>): boolean => {
+		blockingActivity = "model";
+		renderQueue(ctx);
+		void (async () => {
+			try {
+				const models = availableModels(ctx);
+				let model = command.target ? exactModel(command.target, models) : undefined;
+				if (!model) {
+					const choices = modelChoices(command.target, models);
+					if (choices.length === 0) {
+						throw new Error(command.target
+							? `No available model matches ${command.target}`
+							: "No models are available");
+					}
+					if (!ctx.hasUI) throw new Error("Model selection requires an interactive Pi session");
+					const selected = await ctx.ui.select(
+						command.target ? `Queued /model · ${command.target}` : "Queued /model",
+						choices,
+					);
+					if (!selected) throw new Error("model selection cancelled");
+					model = exactModel(selected, models);
+					if (!model) throw new Error(`Selected model is no longer available: ${selected}`);
+				}
+				if (!(await pi.setModel(model))) throw new Error(`No authentication for ${model.provider}/${model.id}`);
+				finishControlCommand(ctx, item, "model");
+			} catch (error) {
+				pauseControlCommand(ctx, item, "model", error);
+			}
+		})();
+		return true;
+	};
+
+	const executeFabricPrewalkRow = (ctx: ExtensionContext, item: QueuedMessage<ImageContent>): boolean => {
+		blockingActivity = "fabric-prewalk";
+		renderQueue(ctx);
+		const result = requestFabricPrewalk(pi, ctx);
+		if (!result) {
+			pauseControlCommand(
+				ctx,
+				item,
+				"fabric-prewalk",
+				"no compatible Pi Fabric listener is installed (requires pi-fabric 0.62.7 or newer)",
+			);
+			return false;
+		}
+		void result.then((response) => {
+			if (response.ok) finishControlCommand(ctx, item, "fabric-prewalk");
+			else pauseControlCommand(ctx, item, "fabric-prewalk", response.error);
+		});
+		return true;
+	};
+
 	// Execute the command row at the lane head. Only called when the agent is idle.
 	const executeCommandRow = (ctx: ExtensionContext, lane: QueueLane): boolean => {
 		const next = queue.peek(lane);
 		if (!next) return false;
 		const command = itemCommand(next);
 		if (!command) return false;
+		if (command.kind === "model") return executeModelRow(ctx, next, command);
+		if (command.kind === "fabric-prewalk") return executeFabricPrewalkRow(ctx, next);
+		if (command.kind === "new") {
+			blockingActivity = "new";
+			pendingNewRowId = next.id;
+			plannedNewSession = false;
+			paused = false;
+			renderQueue(ctx);
+			commandSubmitTimer = setTimeout(() => {
+				commandSubmitTimer = undefined;
+				try {
+					pi.sendUserMessage(`/${INTERNAL_NEW_COMMAND}`, { expandPromptTemplates: true });
+				} catch (error) {
+					pauseControlCommand(ctx, next, "new", error);
+				}
+			}, 0);
+			return true;
+		}
+
 		const submit = tuiSubmit;
 		if (command.kind === "reload" && !submit) {
 			paused = true;
@@ -480,8 +638,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 		blockingActivity = "reload";
 		// Defer so the extension runtime is never torn down from inside this handler.
-		reloadSubmitTimer = setTimeout(() => {
-			reloadSubmitTimer = undefined;
+		commandSubmitTimer = setTimeout(() => {
+			commandSubmitTimer = undefined;
 			submit?.("/reload");
 		}, 0);
 		return true;
@@ -514,7 +672,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const dispatchFromIdle = (ctx: ExtensionContext): boolean => {
+	function dispatchFromIdle(ctx: ExtensionContext): boolean {
 		activeContext = ctx;
 		if (blockingActivity) {
 			renderQueue(ctx);
@@ -532,7 +690,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		const head = queue.peek(lane);
 		if (head && itemCommand(head)) return executeCommandRow(ctx, lane);
 		return sendHeadMessage(ctx, lane);
-	};
+	}
 
 	const deferCompactionFinish = (
 		ctx: ExtensionContext,
@@ -592,8 +750,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (!head) return false;
 		const headCommand = itemCommand(head);
 		if (headCommand) {
-			if (blockingActivity === "reload" || !ctx.isIdle()) {
-				ctx.ui.notify(`Queued /${headCommand.kind} runs when the agent is idle`, "info");
+			if (blockingActivity || !ctx.isIdle()) {
+				ctx.ui.notify(`Queued ${commandLabel(headCommand)} runs when the agent is idle`, "info");
 				return false;
 			}
 			return executeCommandRow(ctx, "followUp");
@@ -614,7 +772,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return;
 		}
 		if (blockingActivity) {
-			ctx.ui.notify("The queue drains after the current compaction or reload finishes", "info");
+			ctx.ui.notify("The queue drains after the current control command finishes", "info");
 			return;
 		}
 		const messages = queue.snapshot().filter((item) => !itemCommand(item));
@@ -811,12 +969,19 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						editor.setText("");
 						return;
 					}
-					if (ctx.isIdle() && (isQueueableSubmission(text) || isExpandableSlashCommand(text, pi.getCommands()))) {
+					if (
+						ctx.isIdle()
+						&& (
+							isQueueableSubmission(text)
+							|| isExpandableSlashCommand(text, pi.getCommands())
+							|| queuesWhileStopped(parseQueuedCommand(text))
+						)
+					) {
 						// While the agent is stopped, Option+Enter parks the submission in
 						// the follow-up lane, paused; plain Enter keeps Pi's immediate
-						// send. Skill and prompt-template invocations park the same way
-						// and expand when reached; built-ins, extension commands, unknown
-						// slash input and bash still act immediately. Pending paste images
+						// send. Skills, templates and the whitelisted Factory controls park
+						// the same way; other built-ins, extension commands, unknown slash
+						// input and bash still act immediately. Pending paste images
 						// are not readable here, matching upstream's native-capture fidelity.
 						queue.enqueue("followUp", text, []);
 						paused = true;
@@ -927,6 +1092,27 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}, 0);
 	};
 
+	pi.registerCommand(INTERNAL_NEW_COMMAND, {
+		description: "Internal adapter for a queued /new session handoff",
+		handler: async (_args, commandContext: ExtensionCommandContext) => {
+			const rowId = pendingNewRowId;
+			const row = rowId ? queue.get(rowId) : undefined;
+			if (blockingActivity !== "new" || !row) {
+				commandContext.ui.notify("No queued /new handoff is pending", "warning");
+				return;
+			}
+			plannedNewSession = true;
+			try {
+				const result = await commandContext.newSession();
+				if (result.cancelled) {
+					pauseControlCommand(commandContext, row, "new", "new session cancelled");
+				}
+			} catch (error) {
+				pauseControlCommand(commandContext, row, "new", error);
+			}
+		},
+	});
+
 	pi.registerCommand(DRAIN_COMMAND, {
 		description: "Drain every queued message into the run as steering, in timeline order",
 		handler: async (_args, ctx) => {
@@ -938,7 +1124,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		activeContext = ctx;
 		settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 		ctx.ui.setWidget(WIDGET_ID, undefined);
-		restoreReloadStash(event.reason, ctx);
+		restoreRuntimeStash(event.reason, ctx);
 		restoreSessionQueue(event.reason, ctx);
 		installEditor(ctx);
 		scheduleEditorInstall(ctx);
@@ -975,9 +1161,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		// Alt+Enter can bypass Pi's built-in command dispatch while idle.
 		if (event.streamingBehavior === undefined && command && (event.images?.length ?? 0) === 0 && ctx.isIdle()) {
 			queue.enqueue("followUp", event.text, event.images ?? []);
-			paused = false;
+			paused = queuesWhileStopped(command);
 			renderQueue(ctx);
-			dispatchFromIdle(ctx);
+			if (!paused) dispatchFromIdle(ctx);
 			return { action: "handled" };
 		}
 
@@ -1053,14 +1239,31 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
+		const queuedNewHandoff =
+			event.reason === "new"
+			&& plannedNewSession
+			&& pendingNewRowId !== undefined
+			&& queue.get(pendingNewRowId) !== undefined;
 		if (event.reason === "reload" && queue.length > 0) {
-			const stash: ReloadStash = { paused, rows: queue.snapshot() };
+			const stash: RuntimeStash = { reason: "reload", paused, rows: queue.snapshot() };
+			globalThis.__tmustierPiQueueSteerReloadStash = stash;
+		} else if (queuedNewHandoff) {
+			queue.remove(pendingNewRowId!);
+			try {
+				persistQueueTombstone(pi);
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not retire the old session queue snapshot: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+			}
+			const stash: RuntimeStash = { reason: "new", paused, rows: queue.snapshot() };
 			globalThis.__tmustierPiQueueSteerReloadStash = stash;
 		} else {
 			globalThis.__tmustierPiQueueSteerReloadStash = undefined;
-			// Every other shutdown — quit, /new, /resume, /fork — leaves the
-			// outgoing session with committed rows recorded for a later resume.
-			// Reload is covered by the in-process stash and skips the write.
+			// Ordinary shutdowns leave committed rows in the outgoing session for
+			// a later paused resume. Intentional reload and queued /new handoffs use
+			// the in-process stash instead and never duplicate their trailing rows.
 			if (queue.length > 0) {
 				try {
 					persistQueueSnapshot(pi, queue.snapshot(), paused);
@@ -1073,7 +1276,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			}
 		}
 		if (editorInstallTimer) clearTimeout(editorInstallTimer);
-		if (reloadSubmitTimer) clearTimeout(reloadSubmitTimer);
+		if (commandSubmitTimer) clearTimeout(commandSubmitTimer);
 		if (compactionFinishTimer) clearTimeout(compactionFinishTimer);
 		if (activeContext?.hasUI) {
 			const currentFactory = activeContext.ui.getEditorComponent();
@@ -1091,12 +1294,14 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		editorInstallTimer = undefined;
 		baseEditorFactory = undefined;
 		baseEditorFactoryCaptured = false;
-		reloadSubmitTimer = undefined;
+		commandSubmitTimer = undefined;
 		compactionFinishTimer = undefined;
 		editSession = undefined;
 		settingsManager = undefined;
 		paused = false;
 		blockingActivity = undefined;
+		pendingNewRowId = undefined;
+		plannedNewSession = false;
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		tuiSubmit = undefined;
@@ -1133,14 +1338,20 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		);
 	}
 
-	/** Re-adopt committed queue state after Pi's in-process runtime swap. */
-	function restoreReloadStash(reason: string, ctx: ExtensionContext): void {
+	/** Re-adopt committed queue state after an intentional in-process runtime swap. */
+	function restoreRuntimeStash(reason: string, ctx: ExtensionContext): void {
 		const stash = globalThis.__tmustierPiQueueSteerReloadStash;
 		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
-		if (!stash || reason !== "reload" || stash.rows.length === 0) return;
-		queue.restore(stash.rows);
-		paused = stash.paused;
-		ctx.ui.notify(`Restored ${stash.rows.length} queued row${stash.rows.length === 1 ? "" : "s"} after reload`, "info");
+		const stashReason = stash?.reason ?? "reload";
+		if (!stash || reason !== stashReason) return;
+		if (stash.rows.length > 0) {
+			queue.restore(stash.rows);
+			paused = stash.paused;
+			ctx.ui.notify(
+				`Restored ${stash.rows.length} queued row${stash.rows.length === 1 ? "" : "s"} after ${stashReason}`,
+				"info",
+			);
+		}
 		setTimeout(() => {
 			const current = activeContext;
 			if (current && !paused && !editSession && queue.length > 0 && current.isIdle()) {

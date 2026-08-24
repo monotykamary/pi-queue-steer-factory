@@ -25,7 +25,28 @@ npm run ci
 
 The suite covers queue/edit invariants, command classification, images, one-at-a-time and all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
 
-Latest result with Pi 0.84.1: 81 tests passed.
+Latest result with Pi 0.84.3: 114 tests passed.
+
+
+## Factory control pipeline
+
+Pi 0.84.3 verification covers 114 automated tests. The control-row matrix includes exact `/new`, `/model [target]`, and `/fabric prewalk` parsing; stopped `Option+Enter` capture; model selection success and cancellation; missing-Fabric restoration; request/ack ordering; cancelled session creation; and the complete `/new` → `/model` → `/fabric prewalk` → task handoff.
+
+A queued `/new` removes itself from the transferred tail, writes an empty invisible snapshot in the old session to retire any older persisted queue, and restores the tail automatically only in the new in-process runtime. Ordinary startup/resume restoration remains paused and requires an explicit empty-composer `Enter`.
+
+Pi Fabric 0.62.7 adds the host-local `pi-fabric:prewalk:request:v1` claim/respond protocol. Its full verification passes 1,932 tests, typecheck, build artifact checks, lazy-graph checks, and dead-code analysis. The queue does not release the row behind `/fabric prewalk` until Fabric responds that the arm completed; cancellation, configuration errors, and absent compatible listeners leave the command row in place and pause delivery.
+
+A real Pi 0.84.3 tmux probe loaded the built Pi Fabric extension and this source extension in an isolated trusted project. The paused capture rendered all four rows in order:
+
+```text
+follow-ups (4) · paused
+/new · runs when idle
+/model faux/queue-e2e · runs when idle
+/fabric prewalk · runs when idle
+factory control probe
+```
+
+One empty-composer `Enter` replaced the session, selected the model, armed prewalk, and started exactly one provider call. Its user context contained `factory control probe` followed by Fabric's hidden prewalk framing, and the final TUI showed `Fabric prewalk armed for the next task` with an empty visible queue. Probe artifacts are retained at `/tmp/pi-queue-steer-factory-tui` for the release run.
 
 ## Real TUI evidence
 
@@ -109,7 +130,7 @@ The deterministic suite now also covers queue persistence across Pi resume:
 - foreign custom types, wrong-version payloads and malformed rows are skipped, so an unreadable snapshot can never crash or strand the timeline;
 - restored row counters stay collision-free with later enqueues, and image attachments, lanes and FIFO order round-trip a real `SessionManager` JSONL file while the snapshot stays out of `buildSessionContext`.
 
-Local verification after the change: `npm run ci` passes with 106 automated tests.
+Local verification after the Factory control change: `npm run ci` passes with 114 automated tests.
 
 ### Boundary
 
