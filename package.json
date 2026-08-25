@@ -1,6 +1,6 @@
 {
   "name": "pi-queue-steer-factory",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Visible steering, follow-up, and session-control queues for Pi and Pi Fabric.",
   "type": "module",
   "license": "MIT",
