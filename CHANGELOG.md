@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-08-25
+
+### Fixed
+
+- A threshold auto-compaction racing a run error no longer releases the error hold: zero-usage network failures (for example a WebSocket error) still trip the context threshold afterwards, but that compaction is housekeeping rather than recovery, so the queue now stays parked for built-in retry, pi-retry style re-prompting, or an explicit empty-composer `Enter`. An overflow-recovery compaction cycle still closes the hold the way it did before.
+
 ## 0.8.0 - 2026-08-25
 
 ### Added
