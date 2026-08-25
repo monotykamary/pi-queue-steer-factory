@@ -117,6 +117,10 @@ The [public evidence comment](https://github.com/tmustier/pi-queue-steer/pull/9#
 
 This evidence confirms the public API boundary: ordinary input submitted while manual compaction is active belongs to Pi's native post-compaction queue and can execute before extension-owned command rows resume.
 
+## Run-error holds
+
+The deterministic suite covers the error-hold lifecycle end to end: a run ending in an error or context overflow pauses the queue (one notification per hold) and a bare `agent_settled` flushes nothing into the failed session; the first healthy assistant tail — produced by built-in retry or an external loop such as pi-retry re-prompting from the idle signal — releases the hold and dispatches exactly once; a concluded overflow compaction closes recovery without a post-run and still releases; a `session_compact_failed` recovery and an aborted retry tail both keep the rows parked until an explicit empty-composer `Enter`. The real-session integration suite replays the overflow-compaction and built-in-retry recoveries against a live `AgentSession` with the extension loaded.
+
 ## Public API boundary
 
 `ExtensionAPI.sendUserMessage` and the TUI editor submit callback return `void`. The extension can restore synchronous handoff failures and preflight/expansion failures, but it cannot prove every later asynchronous acceptance or rejection without risking duplicate delivery. Queued `/reload` likewise has no result channel. These limits are documented in the README and are not hidden by timing heuristics.

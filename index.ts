@@ -40,7 +40,7 @@ export const QUEUE_STEER_STATE_EVENT = "queue-steer:state";
 export interface QueueSteerState {
 	/** Rows still held by the queue — both lanes, including paused/held rows. */
 	pending: number;
-	/** Dispatch paused (aborted turn, failed preparation, or manual pause). */
+	/** Dispatch paused (aborted turn, failed preparation, agent error hold, or manual pause). */
 	paused: boolean;
 	/** A blocking control row (/compact, /model, /new, /reload, prewalk) is executing. */
 	blocked: boolean;
@@ -365,6 +365,16 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let commandSubmitTimer: ReturnType<typeof setTimeout> | undefined;
 	let renderingInline = false;
 	let paused = false;
+	// Runs that end in an error (or context overflow) park the queue behind an
+	// error hold alongside the pause: Pi's built-in retry and auto-compaction
+	// settle only after that agent_end, and external retry loops such as
+	// pi-retry re-prompt from the idle signal, so any row dispatched before
+	// recovery would jump ahead of it. The hold lifts at the first healthy
+	// assistant tail and releases its pause; every other pause or resume path
+	// below clears the hold, so recovery never lifts a pause the user — or
+	// another failure — asked for. Runs that settle still failed keep their
+	// rows parked for an explicit empty-composer Enter.
+	let errorHold = false;
 	let settingsManager: SettingsManager | undefined;
 	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | "fabric-await" | undefined;
 	let fabricAwaitAbort: AbortController | undefined;
@@ -374,6 +384,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let compactionFinishTimer: ReturnType<typeof setTimeout> | undefined;
 	let nativeCompactionInputQueued = false;
 	let nativeCompactionTurnStarted = false;
+	// A compact-and-retry that ended in session_compact_failed is not recovery:
+	// the error hold stays parked for an explicit Enter instead of releasing at
+	// the compaction settle.
+	let compactionRecoveryFailed = false;
 	const isCompacting = (): boolean => blockingActivity === "compact" || blockingActivity === "auto-compact";
 	const trackNativeCompactionSubmission = (
 		text: string,
@@ -392,8 +406,42 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		followUp: settingsManager?.getFollowUpMode() ?? "one-at-a-time",
 	});
 
-	const pauseAfterPreparationFailure = (ctx: ExtensionContext, lane: QueueLane, error: unknown): void => {
+	/**
+	 * Park the queue behind an error hold after a failed run tail. An
+	 * already-paused queue keeps its existing pause reason — the hold is only
+	 * set when the error itself caused the pause, and releases nothing else.
+	 * Empty queues have nothing to protect.
+	 */
+	const pauseForFailedRun = (ctx: ExtensionContext): void => {
+		if (queue.length === 0) {
+			renderQueue(ctx);
+			return;
+		}
+		if (!paused) {
+			errorHold = true;
+			paused = true;
+			ctx.ui.notify(
+				"Agent run stopped with an error; queue paused — it resumes automatically once the run recovers",
+				"warning",
+			);
+		}
+		renderQueue(ctx);
+	};
+
+	/** Generic pause, unrelated to run recovery: supersedes any error hold. */
+	const pauseQueue = (): void => {
+		errorHold = false;
 		paused = true;
+	};
+
+	/** Explicit go: clear the pause together with any error hold behind it. */
+	const resumeQueue = (): void => {
+		errorHold = false;
+		paused = false;
+	};
+
+	const pauseAfterPreparationFailure = (ctx: ExtensionContext, lane: QueueLane, error: unknown): void => {
+		pauseQueue();
 		renderQueue(ctx);
 		ctx.ui.notify(
 			`Could not prepare queued ${laneLabel(lane)}; queue paused: ${error instanceof Error ? error.message : String(error)}`,
@@ -490,7 +538,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 	const renderQueue = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
-		if (queue.length === 0) paused = false;
+		if (queue.length === 0) resumeQueue();
 		broadcastQueueState();
 		if (ctx.mode !== "tui" || queue.length === 0) {
 			ctx.ui.setWidget(WIDGET_ID, undefined);
@@ -589,7 +637,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			pendingNewRowId = undefined;
 			plannedNewSession = false;
 		}
-		paused = true;
+		pauseQueue();
 		renderQueue(ctx);
 		const command = itemCommand(item);
 		ctx.ui.notify(
@@ -610,7 +658,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 		queue.remove(item.id);
 		blockingActivity = undefined;
-		paused = false;
+		resumeQueue();
 		renderQueue(ctx);
 		if (!editSession && queue.length > 0 && ctx.isIdle()) dispatchFromIdle(ctx);
 	};
@@ -720,7 +768,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			blockingActivity = "new";
 			pendingNewRowId = next.id;
 			plannedNewSession = false;
-			paused = false;
+			resumeQueue();
 			renderQueue(ctx);
 			commandSubmitTimer = setTimeout(() => {
 				commandSubmitTimer = undefined;
@@ -735,18 +783,18 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 		const submit = tuiSubmit;
 		if (command.kind === "reload" && !submit) {
-			paused = true;
+			pauseQueue();
 			renderQueue(ctx);
 			ctx.ui.notify("Could not run queued /reload; queue paused because no interactive submit handler is available", "error");
 			return false;
 		}
 		queue.shift(lane);
-		paused = false;
+		resumeQueue();
 		renderQueue(ctx);
 		if (command.kind === "compact") {
 			if (startCompaction(ctx, command.instructions)) return true;
 			queue.prepend(next);
-			paused = true;
+			pauseQueue();
 			renderQueue(ctx);
 			return false;
 		}
@@ -770,7 +818,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return false;
 		}
 		queue.shift(lane);
-		paused = false;
+		resumeQueue();
 		renderQueue(ctx);
 		try {
 			pi.sendUserMessage(userContent(prepared), deliverAs ? { deliverAs } : undefined);
@@ -822,6 +870,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			blockingActivity = undefined;
 			nativeCompactionInputQueued = false;
 			nativeCompactionTurnStarted = false;
+			// A concluded compaction cycle closes the failed run's recovery
+			// window without a healthy agent_end ever arriving; release the
+			// error hold unless that recovery itself failed.
+			if (errorHold && !compactionRecoveryFailed) resumeQueue();
+			compactionRecoveryFailed = false;
 			const current = activeContext ?? ctx;
 			renderQueue(current);
 			if (!paused && !editSession && queue.length > 0 && current.isIdle()) dispatchFromIdle(current);
@@ -857,7 +910,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 	const deferCommand = (ctx: ExtensionContext, text: string): void => {
 		queue.enqueue("followUp", text);
-		paused = false;
+		resumeQueue();
 		renderQueue(ctx);
 	};
 
@@ -906,7 +959,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			const commands = pi.getCommands();
 			prepared = messages.map((item) => ({ ...item, text: expandQueuedInput(item.text, commands) }));
 		} catch (error) {
-			paused = true;
+			pauseQueue();
 			renderQueue(ctx);
 			ctx.ui.notify(
 				`Could not prepare queued messages; queue paused: ${error instanceof Error ? error.message : String(error)}`,
@@ -919,14 +972,14 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		const commandNote = keptCommands > 0
 			? `; ${keptCommands} command row${keptCommands === 1 ? " stays" : "s stay"} queued`
 			: "";
-		paused = false;
+		resumeQueue();
 
 		const idle = ctx.isIdle();
 		try {
 			pi.sendUserMessage(mergedDrainContent(prepared), idle ? undefined : { deliverAs: "steer" });
 		} catch (error) {
 			queue.prependMany(messages);
-			paused = true;
+			pauseQueue();
 			renderQueue(ctx);
 			ctx.ui.notify(
 				`Could not drain the queue: ${error instanceof Error ? error.message : String(error)}; restored every row`,
@@ -1117,7 +1170,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						// input and bash still act immediately. Pending paste images
 						// are not readable here, matching upstream's native-capture fidelity.
 						queue.enqueue("followUp", text, []);
-						paused = true;
+						pauseQueue();
 						editor.addToHistory?.(text);
 						editor.setText("");
 						renderQueue(ctx);
@@ -1136,7 +1189,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 					keybindings.matches(data, "app.interrupt") &&
 					!isShowingAutocomplete()
 				) {
-					paused = true;
+					pauseQueue();
 					ctx.abort();
 					renderQueue(ctx);
 					return;
@@ -1151,7 +1204,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						return;
 					}
 					if (paused) {
-						paused = false;
+						resumeQueue();
 						if (ctx.isIdle()) dispatchFromIdle(ctx);
 						else renderQueue(ctx);
 						return;
@@ -1230,7 +1283,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			if (selected !== allPeers) label = cards[options.indexOf(selected) - 1]?.label;
 		}
 		queue.enqueue("followUp", label ? `/fabric await ${label}` : "/fabric await");
-		paused = false;
+		resumeQueue();
 		renderQueue(ctx);
 		if (cards.length === 0) {
 			ctx.ui.notify("No live peers on this project mesh; the gate resolves immediately", "info");
@@ -1260,7 +1313,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			}
 			if (command?.kind === "reload" && !editSession && (blockingActivity === "reload" || !ctx.isIdle())) {
 				queue.enqueue("followUp", text, []);
-				paused = false;
+				resumeQueue();
 				renderQueue(ctx);
 				return;
 			}
@@ -1347,7 +1400,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		const command = parseQueuedCommand(event.text);
 		if (event.streamingBehavior === "steer" || event.streamingBehavior === "followUp") {
 			queue.enqueue(event.streamingBehavior, event.text, event.images);
-			paused = false;
+			resumeQueue();
 			renderQueue(ctx);
 			return { action: "handled" };
 		}
@@ -1356,6 +1409,8 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		if (event.streamingBehavior === undefined && command && (event.images?.length ?? 0) === 0 && ctx.isIdle()) {
 			queue.enqueue("followUp", event.text, event.images ?? []);
 			paused = queuesWhileStopped(command);
+			// An explicit enqueue supersedes any error hold standing behind it.
+			errorHold = false;
 			renderQueue(ctx);
 			if (!paused) dispatchFromIdle(ctx);
 			return { action: "handled" };
@@ -1368,9 +1423,14 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		activeContext = ctx;
 		if (blockingActivity || event.reason === "manual") return;
 		blockingActivity = "auto-compact";
+		compactionRecoveryFailed = false;
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		renderQueue(ctx);
+	});
+
+	pi.on("session_compact_failed", () => {
+		compactionRecoveryFailed = true;
 	});
 
 	pi.on("turn_start", (_event, ctx) => {
@@ -1381,7 +1441,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	pi.on("turn_end", async (event, ctx) => {
 		activeContext = ctx;
 		if (event.message.role === "assistant" && event.message.stopReason === "aborted") {
-			if (queue.length > 0 && blockingActivity !== "compact") paused = true;
+			if (queue.length > 0 && blockingActivity !== "compact") pauseQueue();
 			renderQueue(ctx);
 			return;
 		}
@@ -1394,20 +1454,36 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	// continuation semantics without relinquishing later editable rows early.
 	pi.on("agent_end", async (event, ctx) => {
 		activeContext = ctx;
-		if (paused) return;
 		const lastMessage = event.messages.at(-1);
 		if (
 			lastMessage?.role === "assistant"
 			&& (
-				lastMessage.stopReason === "length"
-				|| lastMessage.stopReason === "error"
+				lastMessage.stopReason === "error"
 				|| isContextOverflow(lastMessage, ctx.model?.contextWindow ?? 0)
 			)
 		) {
+			// Pause on every failed tail, settled or not. Pi decides whether to
+			// retry or auto-compact only after agent_end, and retry extensions
+			// such as pi-retry re-prompt from the idle signal — any dispatch now,
+			// or the settle flush that used to follow, would jump a row ahead of
+			// that recovery. The hold lifts at the first healthy tail below; a
+			// run that settles still failed keeps its rows parked for an explicit
+			// empty-composer Enter.
+			pauseForFailedRun(ctx);
+			return;
+		}
+		// Aborted tails prove nothing about recovery, so they leave an error
+		// hold standing; anything else that produced assistant output counts
+		// as recovery and lifts the hold before the usual dispatch checks.
+		if (lastMessage?.role === "assistant" && lastMessage.stopReason !== "aborted") {
+			if (errorHold) resumeQueue();
+		}
+		if (lastMessage?.role === "assistant" && lastMessage.stopReason === "length") {
 			// Pi decides whether to retry or auto-compact only after agent_end.
 			// Injecting a follow-up here would start it first and hide that signal.
 			return;
 		}
+		if (paused) return;
 		if (queue.laneLength("steer") > 0) {
 			await dispatchLaneAtBoundary(ctx, "steer");
 			return;
@@ -1495,12 +1571,13 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		fabricAwaitAbort?.abort();
 		fabricAwaitAbort = undefined;
 		fabricAwaitNote = "";
-		paused = false;
+		resumeQueue();
 		blockingActivity = undefined;
 		pendingNewRowId = undefined;
 		plannedNewSession = false;
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
+		compactionRecoveryFailed = false;
 		tuiSubmit = undefined;
 		queue.clear();
 	});
@@ -1528,7 +1605,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		}
 		// Restored rows always park in the paused state: nothing ships until
 		// the user presses Enter on the empty composer.
-		paused = true;
+		pauseQueue();
 		ctx.ui.notify(
 			`Restored ${snapshot.rows.length} queued row${snapshot.rows.length === 1 ? "" : "s"} after resume; queue paused — ${keyText("tui.input.submit")} sends the next row`,
 			"info",
@@ -1544,6 +1621,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		if (stash.rows.length > 0) {
 			queue.restore(stash.rows);
 			paused = stash.paused;
+			errorHold = false;
 			ctx.ui.notify(
 				`Restored ${stash.rows.length} queued row${stash.rows.length === 1 ? "" : "s"} after ${stashReason}`,
 				"info",

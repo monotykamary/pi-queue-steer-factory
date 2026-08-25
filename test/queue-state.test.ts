@@ -1338,6 +1338,120 @@ test("releases a length-stop hold at settle when Pi does not compact", async () 
 	assert.equal(harness.sent[0]?.content, "after full-length output");
 });
 
+test("parks queued rows when the agent run ends in an error, across the settle", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "after the error");
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+	});
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /paused/);
+	assert.equal(harness.notifications.at(-1)?.level, "warning");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /queue paused/);
+
+	// A bare settle must not flush rows into the failed session: the rows stay
+	// parked for a retry mechanism, or for an explicit empty-composer Enter.
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /after the error/);
+	assert.match(renderWidget(harness), /paused/);
+});
+
+test("releases the error hold at the first healthy tail after recovery", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "after recovery");
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+	});
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+
+	// A retry pass (built-in, or an external loop such as pi-retry) produced a
+	// clean run: the hold lifts and the parked row flows exactly once.
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+	});
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "after recovery");
+
+	// A repeated failed hold only notifies and pauses once.
+	assert.equal(
+		harness.notifications.filter(({ message }) => message.includes("queue paused")).length,
+		1,
+	);
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 1);
+});
+
+test("an abort during error recovery leaves the rows parked until Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "held through abort");
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+	});
+	await harness.emit("agent_settled");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "aborted" } });
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "aborted", content: [] }],
+	});
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /held through abort/);
+
+	harness.editor.handleInput("enter");
+	assert.equal(harness.sent[0]?.content, "held through abort");
+});
+
+test("a concluded auto-compaction closes recovery and releases the error hold", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "after overflow recovery");
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "context overflow", content: [] }],
+	});
+	assert.equal(harness.sent.length, 0);
+
+	// Overflow compaction recovers without any further agent run: the hold
+	// releases when the compaction settle accounting closes.
+	await harness.emit("session_before_compact", { reason: "overflow" });
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "after overflow recovery");
+});
+
+test("a failed compact-and-retry keeps the error hold parked until Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "still parked");
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+	});
+	await harness.emit("session_before_compact", { reason: "overflow" });
+	await harness.emit("session_compact_failed", { reason: "overflow", aborted: false });
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /still parked/);
+	assert.match(renderWidget(harness), /paused/);
+
+	harness.editor.handleInput("enter");
+	assert.equal(harness.sent[0]?.content, "still parked");
+});
+
 test("holds reload through automatic compaction until the agent settles", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");

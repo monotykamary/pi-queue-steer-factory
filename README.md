@@ -56,6 +56,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Editing a row | `Escape` | Cancel the session and roll back all unsaved row edits |
 | Empty composer, follow-up queued | `Enter` | Promote the oldest follow-up to steering now |
 | Queue paused after an abort | `Enter` | Resume from the next steering row, or the next follow-up |
+| Queue paused after a run error | `Enter` | Resume manually; a recovered run (built-in retry, auto-compact, pi-retry) releases the queue first |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
 | Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, or `/fabric prewalk` visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
@@ -80,7 +81,11 @@ The extension keeps Pi’s 2 delivery classes:
 - reordering waits while a lane toggle is pending; the lane move lands first on save
 - Pi’s `one-at-a-time` and `all` settings apply independently at active-run delivery boundaries
 
-The extension hands messages back to Pi’s native queues only when their delivery boundary arrives. They remain visible and editable before that point. Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
+The extension hands messages back to Pi's native queues only when their delivery boundary arrives. They remain visible and editable before that point. Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
+
+## Run errors and retries
+
+A run that ends in an error (including context overflow) pauses the queue instead of de-queueing the next row into the failed session. Recovery gets the queue first: Pi's built-in retry and overflow auto-compaction, or an external retry loop such as pi-retry that re-prompts once the agent goes idle. The pause lifts automatically at the first healthy assistant tail — or when the compact-and-retry cycle concludes — and the parked rows then flow in order. If nothing recovers the run (no retry installed, retries exhausted, or compact-and-retry itself failed), the rows stay parked until `Enter` sends the next one. Aborting during recovery keeps the pause; an aborted tail never counts as recovery.
 
 ## Queueing while stopped
 
