@@ -25,12 +25,12 @@ npm run ci
 
 The suite covers queue/edit invariants, command classification, images, one-at-a-time and all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
 
-Latest result with Pi 0.84.3: 114 tests passed.
+Latest result with Pi 0.84.3: 136 tests passed.
 
 
 ## Factory control pipeline
 
-Pi 0.84.3 verification covers 114 automated tests. The control-row matrix includes exact `/new`, `/model [target]`, and `/fabric prewalk` parsing; stopped `Option+Enter` capture; model selection success and cancellation; missing-Fabric restoration; request/ack ordering; cancelled session creation; and the complete `/new` → `/model` → `/fabric prewalk` → task handoff.
+Pi 0.84.3 verification covers 136 automated tests. The control-row matrix includes exact `/new`, `/model [target]`, and `/fabric prewalk` parsing; stopped `Option+Enter` capture; model selection success and cancellation; missing-Fabric restoration; request/ack ordering; cancelled session creation; and the complete `/new` → `/model` → `/fabric prewalk` → task handoff.
 
 A queued `/new` removes itself from the transferred tail, writes an empty invisible snapshot in the old session to retire any older persisted queue, and restores the tail automatically only in the new in-process runtime. Ordinary startup/resume restoration remains paused and requires an explicit empty-composer `Enter`.
 

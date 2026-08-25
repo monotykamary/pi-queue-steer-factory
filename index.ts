@@ -60,6 +60,7 @@ declare global {
 	var __tmustierPiQueueSteerState: QueueSteerState | undefined;
 }
 const DRAIN_COMMAND = "queue-drain";
+const PAUSE_COMMAND = "pause";
 const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
 const REMOVE_ROW_KEY = "alt+x";
 const TOGGLE_LANE_KEY = "alt+t";
@@ -375,6 +376,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// another failure — asked for. Runs that settle still failed keep their
 	// rows parked for an explicit empty-composer Enter.
 	let errorHold = false;
+	// Graceful run pause: /pause with tool work in flight holds fire until every
+	// in-flight tool call finishes, so pausing never kills a tool mid-execution.
+	// The completion then stops the run at the tool boundary.
+	let pauseAfterToolsArmed = false;
+	const inFlightTools = new Map<string, string>();
 	let settingsManager: SettingsManager | undefined;
 	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | "fabric-await" | undefined;
 	let fabricAwaitAbort: AbortController | undefined;
@@ -438,6 +444,25 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const resumeQueue = (): void => {
 		errorHold = false;
 		paused = false;
+	};
+
+	/**
+	 * Stop the run at the tool boundary: the finishing tool's result is
+	 * already recorded, so nothing is killed mid-flight. The aborted tail
+	 * keeps the visible queue paused through the usual turn_end path; the
+	 * keyboard interrupt stays the abrupt alternative.
+	 */
+	const stopRunAtToolBoundary = (ctx: ExtensionContext): void => {
+		pauseAfterToolsArmed = false;
+		pauseQueue();
+		ctx.abort();
+		renderQueue(ctx);
+		ctx.ui.notify(
+			queue.length > 0
+				? `Tool call finished; run paused — ${keyText("tui.input.submit")} on the empty composer resumes the queue`
+				: "Tool call finished; run paused",
+			"info",
+		);
 	};
 
 	const pauseAfterPreparationFailure = (ctx: ExtensionContext, lane: QueueLane, error: unknown): void => {
@@ -1367,6 +1392,59 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		},
 	});
 
+	/**
+	 * /pause: graceful session-run pause. While tool calls are executing, hold
+	 * fire until every in-flight call finishes and stop at that tool boundary,
+	 * so pausing never kills a tool mid-execution the way an abrupt interrupt
+	 * does. With no tool in flight there is nothing to protect, so the run
+	 * stops immediately. A quiet agent simply parks the visible queue.
+	 */
+	pi.registerCommand(PAUSE_COMMAND, {
+		description: "Pause the run once in-flight tool calls finish, without killing tool work mid-execution",
+		handler: async (_args, ctx) => {
+			activeContext = ctx;
+			if (isCompacting()) {
+				ctx.ui.notify("Compaction is running; wait for it to finish before pausing", "warning");
+				return;
+			}
+			if (ctx.isIdle()) {
+				pauseQueue();
+				renderQueue(ctx);
+				ctx.ui.notify(
+					queue.length === 0
+						? "The agent is idle; nothing to pause"
+						: `Queue paused — ${keyText("tui.input.submit")} on the empty composer resumes it`,
+					"info",
+				);
+				return;
+			}
+			if (inFlightTools.size === 0) {
+				// No tool call is executing (mid-stream text or between turns), so
+				// stopping the LLM call right away kills nothing in flight.
+				pauseQueue();
+				ctx.abort();
+				renderQueue(ctx);
+				ctx.ui.notify(
+					queue.length === 0
+						? "Paused the run; no tool call was in flight"
+						: `Paused the run; queue held — ${keyText("tui.input.submit")} on the empty composer resumes it`,
+					"info",
+				);
+				return;
+			}
+			const names = [...new Set(inFlightTools.values())].join(", ");
+			if (pauseAfterToolsArmed) {
+				ctx.ui.notify(`Pause is already armed; waiting for ${names} to finish`, "info");
+				return;
+			}
+			pauseAfterToolsArmed = true;
+			ctx.ui.notify(
+				`Pausing after ${names} ${inFlightTools.size === 1 ? "finishes" : "finish"}; tool work keeps running`,
+				"info",
+			);
+		},
+	});
+
 	pi.on("session_start", (event, ctx) => {
 		activeContext = ctx;
 		settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
@@ -1449,11 +1527,25 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		await dispatchLaneAtBoundary(ctx, "steer");
 	});
 
+	pi.on("tool_execution_start", (event) => {
+		inFlightTools.set(event.toolCallId, event.toolName);
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		inFlightTools.delete(event.toolCallId);
+		if (!pauseAfterToolsArmed || inFlightTools.size > 0) return;
+		stopRunAtToolBoundary(ctx);
+	});
+
 	// Pi checks its native queues again after extension agent_end handlers.
 	// Feeding one item (or an all-mode batch) here preserves native follow-up
 	// continuation semantics without relinquishing later editable rows early.
 	pi.on("agent_end", async (event, ctx) => {
 		activeContext = ctx;
+		// A finished run has nothing in flight; never let leftovers from an
+		// aborted tool end leak into the next run.
+		inFlightTools.clear();
+		pauseAfterToolsArmed = false;
 		const lastMessage = event.messages.at(-1);
 		if (
 			lastMessage?.role === "assistant"
@@ -1573,6 +1665,8 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		fabricAwaitNote = "";
 		resumeQueue();
 		blockingActivity = undefined;
+		pauseAfterToolsArmed = false;
+		inFlightTools.clear();
 		pendingNewRowId = undefined;
 		plannedNewSession = false;
 		nativeCompactionInputQueued = false;

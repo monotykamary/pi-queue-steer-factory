@@ -3,9 +3,12 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Type } from "@earendil-works/pi-ai";
 import {
 	fauxAssistantMessage,
 	fauxProvider,
+	fauxText,
+	fauxToolCall,
 	type FauxProviderHandle,
 } from "@earendil-works/pi-ai/compat";
 import {
@@ -119,6 +122,7 @@ async function createIntegrationHarness(options: {
 	maxTokens?: number;
 	extraExtensions?: ExtensionFactory[];
 	retryEnabled?: boolean;
+	tools?: string[];
 } = {}): Promise<IntegrationHarness> {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-integration-"));
 	const agentDir = join(cwd, "agent");
@@ -175,7 +179,8 @@ async function createIntegrationHarness(options: {
 		settingsManager,
 		sessionManager,
 		resourceLoader,
-		noTools: "all",
+		noTools: options.tools ? undefined : "all",
+		...(options.tools ? { tools: options.tools } : {}),
 	});
 	await session.bindExtensions({ mode: "tui" });
 	return {
@@ -456,6 +461,116 @@ test("publishes queue state on pi.events and globalThis for interop consumers", 
 	} finally {
 		await harness.cleanup();
 		globalThis.__tmustierPiQueueSteerState = undefined;
+	}
+});
+
+test("real /pause stops at the tool boundary without killing the in-flight tool", async () => {
+	let releaseToolGate: (() => void) | undefined;
+	const toolGate = new Promise<void>((resolve) => {
+		releaseToolGate = resolve;
+	});
+	const gateToolExtension: ExtensionFactory = (pi) => {
+		pi.registerTool({
+			name: "gate_tool",
+			label: "Gate tool",
+			description: "Blocks until the test releases it",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await toolGate;
+				return { content: [{ type: "text", text: "gate tool finished cleanly" }], details: undefined };
+			},
+		});
+	};
+	const harness = await createIntegrationHarness({
+		extraExtensions: [gateToolExtension],
+		tools: ["gate_tool"],
+	});
+	let settled = false;
+	let gateToolStarted = false;
+	harness.session.subscribe((event) => {
+		if (event.type === "tool_execution_start" && event.toolName === "gate_tool") gateToolStarted = true;
+		if (event.type === "agent_settled") settled = true;
+	});
+	try {
+		harness.faux.setResponses([
+			fauxAssistantMessage([fauxText("calling the gate tool"), fauxToolCall("gate_tool", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("unreached follow-up reply"),
+		]);
+		const runStarted = nextAgentStart(harness.session);
+		const run = harness.session.prompt("call the gate tool");
+		await within(runStarted, () => "pause-boundary run did not start");
+		await within(
+			(async () => {
+				while (!gateToolStarted) await new Promise((resolve) => setTimeout(resolve, 5));
+			})(),
+			() => "gate tool did not start",
+		);
+
+		// Arm the pause while the tool is mid-flight, and park a follow-up row
+		// to observe the queue pause once the boundary arrives.
+		await harness.session.prompt("/pause", { streamingBehavior: "steer" });
+		await harness.session.prompt("parked during pause", { streamingBehavior: "followUp" });
+
+		// The armed pause must not kill the in-flight tool call or settle the run.
+		// Give the run a beat that would have surfaced an abrupt abort.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(settled, false);
+		assert.equal(harness.session.isStreaming, true);
+
+		releaseToolGate?.();
+		await within(run, () => "run did not settle after the gated tool finished");
+
+		// The tool call ran to completion; its result is recorded without error.
+		const toolResults = harness.session.messages.filter((message) => message.role === "toolResult");
+		assert.equal(toolResults.length, 1);
+		assert.equal(toolResults[0]?.isError, false);
+		const toolText = (toolResults[0]?.content ?? [])
+			.filter((part) => part.type === "text")
+			.map((part) => "text" in part ? part.text : "")
+			.join("\n");
+		assert.match(toolText, /gate tool finished cleanly/);
+
+		// The run stopped at the boundary: the scripted next reply never ran.
+		assert.equal(
+			harness.session.messages.some(
+				(message) => message.role === "assistant"
+					&& message.content.some((part) => part.type === "text" && part.text.includes("unreached follow-up reply")),
+			),
+			false,
+		);
+		// The parked follow-up stayed queued behind the pause.
+		assert.equal(userTexts(harness.session).includes("parked during pause"), false);
+		assert.equal(globalThis.__tmustierPiQueueSteerState?.pending, 1);
+		assert.equal(globalThis.__tmustierPiQueueSteerState?.paused, true);
+	} finally {
+		releaseToolGate?.();
+		await harness.cleanup();
+		globalThis.__tmustierPiQueueSteerState = undefined;
+	}
+});
+
+test("real /pause with no tool in flight stops the run immediately", async () => {
+	const harness = await createIntegrationHarness();
+	try {
+		const stream = gatedResponse("this never completes");
+		harness.faux.setResponses([stream.step]);
+		const runStarted = nextAgentStart(harness.session);
+		const run = harness.session.prompt("hang the stream");
+		await within(runStarted, () => "no-tool pause run did not start");
+		await harness.session.prompt("/pause", { streamingBehavior: "steer" });
+		// The provider only gets its data after the pause fired; with nothing
+		// in flight the stream aborts anyway and the run settles immediately.
+		stream.release();
+		await within(run, () => "run did not settle after /pause");
+		assert.equal(harness.session.isStreaming, false);
+		// The in-flight LLM call was cut: its scripted text never lands and the
+		// tail is classified as aborted (or as the abort's error shape), never
+		// as a completed response.
+		const tail = harness.session.messages.filter((message) => message.role === "assistant").at(-1);
+		assert.notEqual(tail?.stopReason, "stop");
+		assert.notEqual(harness.session.getLastAssistantText(), "this never completes");
+	} finally {
+		await harness.cleanup();
 	}
 });
 

@@ -60,10 +60,15 @@ The extension follows your configured Pi action bindings. These are the default 
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
 | Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, or `/fabric prewalk` visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
+| Agent working | `/pause` | Pause the run once every in-flight tool call finishes; tool work is never killed mid-execution |
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
 | Peer gate waiting | `Escape` | Cancel the wait and pause the gate row |
 
 `Option+Down`, `Option+W`, `Option+X`, `Option+T` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
+
+## Pausing at a tool boundary
+
+Interrupting a run mid-tool (`Escape`) kills the executing tool outright. `/pause` is the graceful alternative: with tool calls in flight it holds fire until every one of them finishes and then stops the run at that tool boundary, so long bash jobs and edits always complete and their results stay in the transcript. With no tool call executing it stops the LLM call immediately, and with the agent idle it simply parks the visible queues. A paused queue stays put until an explicit `Enter` on the empty composer, and `/pause` during compaction reports back instead of cutting summarization.
 
 ## Peer settle gates
 
