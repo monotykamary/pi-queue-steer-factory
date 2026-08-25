@@ -394,6 +394,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// the error hold stays parked for an explicit Enter instead of releasing at
 	// the compaction settle.
 	let compactionRecoveryFailed = false;
+	// Only an overflow compaction recovers a run that died with context
+	// overflow; a threshold compaction after an error is context housekeeping
+	// and must not release the error hold.
+	let compactionIsOverflowRecovery = false;
 	const isCompacting = (): boolean => blockingActivity === "compact" || blockingActivity === "auto-compact";
 	const trackNativeCompactionSubmission = (
 		text: string,
@@ -895,11 +899,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			blockingActivity = undefined;
 			nativeCompactionInputQueued = false;
 			nativeCompactionTurnStarted = false;
-			// A concluded compaction cycle closes the failed run's recovery
-			// window without a healthy agent_end ever arriving; release the
-			// error hold unless that recovery itself failed.
-			if (errorHold && !compactionRecoveryFailed) resumeQueue();
+			// A concluded overflow-recovery compaction closes the failed run's
+			// recovery window without a healthy agent_end ever arriving; release
+			// the error hold unless that recovery itself failed.
+			if (errorHold && compactionIsOverflowRecovery && !compactionRecoveryFailed) resumeQueue();
 			compactionRecoveryFailed = false;
+			compactionIsOverflowRecovery = false;
 			const current = activeContext ?? ctx;
 			renderQueue(current);
 			if (!paused && !editSession && queue.length > 0 && current.isIdle()) dispatchFromIdle(current);
@@ -1502,6 +1507,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		if (blockingActivity || event.reason === "manual") return;
 		blockingActivity = "auto-compact";
 		compactionRecoveryFailed = false;
+		compactionIsOverflowRecovery = event.reason === "overflow";
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		renderQueue(ctx);
@@ -1672,6 +1678,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		compactionRecoveryFailed = false;
+		compactionIsOverflowRecovery = false;
 		tuiSubmit = undefined;
 		queue.clear();
 	});

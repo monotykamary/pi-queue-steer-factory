@@ -1430,6 +1430,34 @@ test("a concluded auto-compaction closes recovery and releases the error hold", 
 	assert.equal(harness.sent[0]?.content, "after overflow recovery");
 });
 
+test("a threshold compaction after a run error is not recovery and keeps the hold parked", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "held across threshold compaction");
+
+	// Network-class failure with zero usage: Pi's auto-compaction still runs at
+	// the context threshold afterwards, but that is housekeeping, not recovery.
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "WebSocket error", content: [] }],
+	});
+	await harness.emit("session_before_compact", { reason: "threshold" });
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /held across threshold compaction/);
+	assert.match(renderWidget(harness), /paused/);
+
+	// A retry loop re-prompting from idle produces a healthy tail; only then
+	// does the hold lift and the parked row flow.
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+	});
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "held across threshold compaction");
+});
+
 test("a failed compact-and-retry keeps the error hold parked until Enter", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");

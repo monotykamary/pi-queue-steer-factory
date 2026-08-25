@@ -90,7 +90,7 @@ The extension hands messages back to Pi's native queues only when their delivery
 
 ## Run errors and retries
 
-A run that ends in an error (including context overflow) pauses the queue instead of de-queueing the next row into the failed session. Recovery gets the queue first: Pi's built-in retry and overflow auto-compaction, or an external retry loop such as pi-retry that re-prompts once the agent goes idle. The pause lifts automatically at the first healthy assistant tail — or when the compact-and-retry cycle concludes — and the parked rows then flow in order. If nothing recovers the run (no retry installed, retries exhausted, or compact-and-retry itself failed), the rows stay parked until `Enter` sends the next one. Aborting during recovery keeps the pause; an aborted tail never counts as recovery.
+A run that ends in an error (including context overflow) pauses the queue instead of de-queueing the next row into the failed session. Recovery gets the queue first: Pi's built-in retry and overflow auto-compaction, or an external retry loop such as pi-retry that re-prompts once the agent goes idle. The pause lifts automatically at the first healthy assistant tail — or when an overflow compact-and-retry cycle concludes — and the parked rows then flow in order. A threshold compaction triggered merely by context size after a failed run is housekeeping, not recovery, and leaves the queue parked. If nothing recovers the run (no retry installed, retries exhausted, or compact-and-retry itself failed), the rows stay parked until `Enter` sends the next one. Aborting during recovery keeps the pause; an aborted tail never counts as recovery.
 
 ## Queueing while stopped
 
