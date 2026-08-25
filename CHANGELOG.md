@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 - 2026-08-25
+
+### Changed
+
+- Agent runs that end in an error (or context overflow) now pause the queue behind an error hold instead of letting the next `agent_settled` flush the head row into the failed session. Built-in retry and overflow auto-compaction — and retry extensions such as pi-retry, which re-prompt from the idle signal after extension `agent_settled` handlers run — now recover first; the hold lifts at the first healthy assistant tail or when the compaction cycle concludes, and the parked rows then flow through the normal dispatch paths. Runs that settle still failed (no retry installed, retries exhausted, or compact-and-retry failed) keep their rows parked for an explicit empty-composer `Enter`, and aborting during recovery never counts as recovery. The hold notifies once per episode, and pause state keeps broadcasting through `queue-steer:state` unchanged.
+
 ## 0.6.0 - 2026-08-25
 
 ### Added
