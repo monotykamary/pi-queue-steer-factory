@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 - 2026-08-25
+
+### Added
+
+- `/pause` pauses the session run at the next tool boundary instead of killing tool work mid-execution: with tool calls in flight it holds fire until every in-flight call finishes and then stops the run, with no tool call executing it stops the LLM call immediately, and with the agent idle it parks the visible queues. The paused tail holds until an explicit empty-composer `Enter`, and in-flight tool results always land cleanly in the transcript first.
+
 ## 0.7.0 - 2026-08-25
 
 ### Changed
