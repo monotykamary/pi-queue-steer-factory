@@ -7,10 +7,16 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { SessionManager, type CompactOptions, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+	FABRIC_PEER_AWAIT_SETTLE_EVENT,
+	FABRIC_PEER_CARDS_EVENT,
+	type FabricPeerAwaitSettleResult,
+	type FabricPeerCard,
+} from "../fabric-peers.ts";
 import { FABRIC_PREWALK_REQUEST_EVENT } from "../fabric-prewalk.ts";
 import queueSteerExtension from "../index.ts";
 import { isQueueSnapshot, latestQueueSnapshot, queueSnapshotOf, QUEUE_SNAPSHOT_TYPE } from "../queue-persistence.ts";
-import { DeliveryQueue, isQueueableSubmission, QueueEditSession, type QueueLane } from "../queue-state.ts";
+import { DeliveryQueue, isQueueableSubmission, parseQueuedCommand, QueueEditSession, type QueueLane } from "../queue-state.ts";
 
 test("keeps steering and follow-ups in independent FIFOs", () => {
 	const queue = new DeliveryQueue<string>();
@@ -1957,4 +1963,191 @@ test("a drain with an unpreparable row keeps every row queued and pauses", async
 	);
 });
 
+
+
+test("parses /fabric await with an optional peer label", () => {
+	assert.deepEqual(parseQueuedCommand("/fabric await"), { kind: "fabric-await" });
+	assert.deepEqual(parseQueuedCommand("/fabric await PQS-2"), { kind: "fabric-await", peer: "PQS-2" });
+	assert.deepEqual(parseQueuedCommand("/fabric  await  pqs-1"), { kind: "fabric-await", peer: "pqs-1" });
+	assert.equal(parseQueuedCommand("/fabric awaiting"), undefined);
+	assert.equal(parseQueuedCommand("/fabric await a b"), undefined);
+});
+
+type PeerAwaitRequest = {
+	selector?: string;
+	signal?: AbortSignal;
+	update?: (progress: { waiting: Array<{ label: string; status: "idle" | "running" }> }) => void;
+	claim: () => boolean;
+	respond: (result: FabricPeerAwaitSettleResult) => void;
+};
+
+const peerCard = (label: string, status: "idle" | "running" = "idle"): FabricPeerCard => ({
+	id: `session:${label.toLowerCase()}`,
+	label,
+	status,
+	model: "openai/gpt-5.4",
+	startedAt: Date.now() - 300_000,
+	updatedAt: Date.now(),
+	pendingMessages: false,
+});
+
+const listenForPeerAwait = (harness: ReturnType<typeof createHarness>): (() => PeerAwaitRequest | undefined) => {
+	let request: PeerAwaitRequest | undefined;
+	harness.events.on(FABRIC_PEER_AWAIT_SETTLE_EVENT, (value) => {
+		request = value as PeerAwaitRequest;
+		assert.equal(request.claim(), true);
+	});
+	return () => request;
+};
+
+test("holds the follow-up tail until the selected peer settles, then delivers", async () => {
+	const harness = createHarness();
+	const latest = listenForPeerAwait(harness);
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/fabric await pqs-1");
+	await enqueue(harness, "followUp", "switch to the new session store");
+
+	await harness.emit("agent_settled");
+	await waitFor(() => latest() !== undefined);
+	assert.equal(latest()?.selector, "pqs-1");
+	assert.equal(harness.sent.length, 0);
+
+	latest()?.update?.({ waiting: [{ label: "PQS-1", status: "running" }] });
+	assert.match(renderWidget(harness), /waiting for PQS-1 \(running\)/);
+
+	latest()?.respond({ ok: true });
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "switch to the new session store");
+});
+
+test("pauses and restores the gate row when no compatible Fabric listener exists", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/fabric await");
+	await enqueue(harness, "followUp", "held behind the gate");
+
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /\/fabric await/);
+	assert.match(renderWidget(harness), /held behind the gate/);
+	assert.match(renderWidget(harness), /paused/);
+	assert.match(
+		harness.notifications.at(-1)?.message ?? "",
+		/requires pi-fabric 0.64.0 or newer/,
+	);
+});
+
+test("Escape abandons an active peer wait and pauses the gate row", async () => {
+	const harness = createHarness();
+	let request: PeerAwaitRequest | undefined;
+	harness.events.on(FABRIC_PEER_AWAIT_SETTLE_EVENT, (value) => {
+		request = value as PeerAwaitRequest;
+		request.claim();
+		request.signal?.addEventListener("abort", () => request?.respond({ ok: false, error: "cancelled" }));
+	});
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "followUp", "/fabric await PQS-1");
+	await enqueue(harness, "followUp", "edit work");
+
+	await harness.emit("agent_settled");
+	await waitFor(() => request !== undefined);
+	assert.equal(request?.signal?.aborted, false);
+
+	harness.editor.handleInput("escape");
+	await waitFor(() => harness.notifications.some(({ message }) => message.includes("cancelled")));
+	assert.match(renderWidget(harness), /\/fabric await PQS-1/);
+	assert.match(renderWidget(harness), /paused/);
+	assert.equal(harness.sent.length, 0);
+});
+
+test("Option+W targets the only live peer without opening a picker", async () => {
+	const harness = createHarness();
+	harness.events.on(FABRIC_PEER_CARDS_EVENT, (value) => {
+		const request = value as { claim: () => boolean; respond: (result: unknown) => void };
+		request.claim();
+		request.respond({ ok: true, cards: [peerCard("PQS-1", "running")] });
+	});
+	const latest = listenForPeerAwait(harness);
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	harness.editor.handleInput("\x1bw");
+	await waitFor(() => latest() !== undefined);
+	assert.equal(harness.selections.length, 0);
+	assert.equal(latest()?.selector, "PQS-1");
+	assert.match(renderWidget(harness), /\/fabric await PQS-1/);
+});
+
+test("Option+W with several peers offers the all-peers default plus cards", async () => {
+	const harness = createHarness({ selectResult: "All 2 peers (project quiet)" });
+	harness.events.on(FABRIC_PEER_CARDS_EVENT, (value) => {
+		const request = value as { claim: () => boolean; respond: (result: unknown) => void };
+		request.claim();
+		request.respond({ ok: true, cards: [peerCard("PQS-1", "running"), peerCard("PQS-2")] });
+	});
+	const latest = listenForPeerAwait(harness);
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	harness.editor.handleInput("\x1bw");
+	await waitFor(() => latest() !== undefined);
+	assert.equal(latest()?.selector, undefined);
+	assert.equal(harness.selections.length, 1);
+	const options = harness.selections[0]?.options ?? [];
+	assert.equal(options[0], "All 2 peers (project quiet)");
+	assert.match(options[1] ?? "", /^● PQS-1 · gpt-5\.4 · running · started 5m ago$/);
+	assert.match(options[2] ?? "", /^○ PQS-2 · gpt-5\.4 · idle · started 5m ago$/);
+	assert.match(renderWidget(harness), /\/fabric await/);
+});
+
+test("Option+W picks a specific peer from its card", async () => {
+	const harness = createHarness({
+		selectResult: "○ PQS-2 · gpt-5.4 · idle · started 5m ago",
+	});
+	harness.events.on(FABRIC_PEER_CARDS_EVENT, (value) => {
+		const request = value as { claim: () => boolean; respond: (result: unknown) => void };
+		request.claim();
+		request.respond({ ok: true, cards: [peerCard("PQS-1", "running"), peerCard("PQS-2")] });
+	});
+	const latest = listenForPeerAwait(harness);
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	harness.editor.handleInput("\x1bw");
+	await waitFor(() => latest() !== undefined);
+	assert.equal(latest()?.selector, "PQS-2");
+	assert.match(renderWidget(harness), /\/fabric await PQS-2/);
+});
+
+test("Option+W again removes a queued gate while a run is active", async () => {
+	const harness = createHarness();
+	harness.events.on(FABRIC_PEER_CARDS_EVENT, (value) => {
+		const request = value as { claim: () => boolean; respond: (result: unknown) => void };
+		request.claim();
+		request.respond({ ok: true, cards: [peerCard("PQS-1")] });
+	});
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "keep this row");
+
+	harness.editor.handleInput("\x1bw");
+	await waitFor(() => renderWidget(harness).includes("/fabric await PQS-1"));
+	harness.editor.handleInput("\x1bw");
+	assert.ok(!renderWidget(harness).includes("/fabric await"));
+	assert.match(renderWidget(harness), /keep this row/);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Removed the peer settle gate/);
+});
+
+test("Option+W without Fabric installed keeps the queue untouched", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "only row");
+
+	harness.editor.handleInput("\x1bw");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /requires pi-fabric 0.64.0 or newer/);
+	assert.match(renderWidget(harness), /only row/);
+	assert.ok(!renderWidget(harness).includes("/fabric await"));
+});
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 - 2026-08-25
+
+### Added
+
+- Peer settle gates through Pi Fabric's mesh: queue `/fabric await [LABEL]` or press `Option+W` to hold the follow-up tail until live peer root sessions settle (quiet window after their last observed run) or leave the mesh. `Option+W` targets the only peer directly, opens a peer-card picker when several exist, and removes a queued gate when pressed again; `Escape` cancels an active wait and pauses the gate row. Requires pi-fabric 0.64.0 or newer via the versioned claim/respond protocol added alongside `/fabric prewalk`.
+
 ## 0.5.0 - 2026-08-25
 
 ### Added

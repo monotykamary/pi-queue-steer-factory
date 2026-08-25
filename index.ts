@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth, type Component, type EditorComponent } from "@earendil-works/pi-tui";
 import { extractInlineEditorLines } from "./editor-render.ts";
+import { requestFabricPeerAwait, requestFabricPeerCards, type FabricPeerCard } from "./fabric-peers.ts";
 import { requestFabricPrewalk } from "./fabric-prewalk.ts";
 import { expandQueuedInput, isExpandableSlashCommand, queuesDuringCompaction } from "./queued-input.ts";
 import { latestQueueSnapshot, persistQueueSnapshot, persistQueueTombstone } from "./queue-persistence.ts";
@@ -62,6 +63,7 @@ const DRAIN_COMMAND = "queue-drain";
 const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
 const REMOVE_ROW_KEY = "alt+x";
 const TOGGLE_LANE_KEY = "alt+t";
+const AWAIT_PEERS_KEY = "alt+w";
 const REORDER_UP_KEY = "alt+shift+up";
 const REORDER_DOWN_KEY = "alt+shift+down";
 
@@ -117,6 +119,7 @@ class QueueTimelineWidget implements Component {
 	private readonly renderInlineEditor: InlineEditorRenderer | undefined;
 	private readonly paused: boolean;
 	private readonly idle: boolean;
+	private readonly awaitNote: string | undefined;
 	private readonly modes: QueueModes;
 	private readonly theme: Theme;
 
@@ -126,6 +129,7 @@ class QueueTimelineWidget implements Component {
 		renderInlineEditor: InlineEditorRenderer | undefined;
 		paused: boolean;
 		idle: boolean;
+		awaitNote: string | undefined;
 		modes: QueueModes;
 		theme: Theme;
 	}) {
@@ -134,6 +138,7 @@ class QueueTimelineWidget implements Component {
 		this.renderInlineEditor = options.renderInlineEditor;
 		this.paused = options.paused;
 		this.idle = options.idle;
+		this.awaitNote = options.awaitNote;
 		this.modes = options.modes;
 		this.theme = options.theme;
 	}
@@ -227,7 +232,9 @@ class QueueTimelineWidget implements Component {
 							: "»";
 			const prefix = this.theme.fg(color, `${marker} `);
 			const moved = item.movedLane ? this.theme.fg("dim", " · moves here on save") : "";
-			const commandNote = item.command && !item.movedLane ? this.theme.fg("dim", " · runs when idle") : "";
+			const commandNote = item.command && !item.movedLane
+				? this.theme.fg("dim", item.command.kind === "fabric-await" && this.awaitNote ? ` · ${this.awaitNote}` : " · runs when idle")
+				: "";
 			const body = this.theme.fg("muted", compactText(item));
 			lines.push(`${border("│")} ${fitCell(`${prefix}${body}${commandNote}${moved}`, cellWidth)} ${border("│")}`);
 			return;
@@ -244,7 +251,9 @@ class QueueTimelineWidget implements Component {
 		const notes: string[] = [];
 		if (item.removed) notes.push(`removed on save · ${REMOVE_ROW_KEY} undoes`);
 		else if (item.movedLane) notes.push(`moves here on save · ${TOGGLE_LANE_KEY} undoes`);
-		if (item.command && !item.removed) notes.push(`command row · runs when idle`);
+		if (item.command && !item.removed) {
+			notes.push(item.command.kind === "fabric-await" && this.awaitNote ? `command row · ${this.awaitNote}` : "command row · runs when idle");
+		}
 		if (item.images.length > 0) {
 			notes.push(`${item.images.length} image${item.images.length === 1 ? "" : "s"} preserved`);
 		}
@@ -283,11 +292,28 @@ function commandLabel(command: QueuedCommand): string {
 		case "new": return "/new";
 		case "model": return "/model";
 		case "fabric-prewalk": return "/fabric prewalk";
+	case "fabric-await": return "/fabric await";
 	}
 }
 
+function relativeAge(ms: number): string {
+	const clamped = Math.max(0, ms);
+	if (clamped < 10_000) return "now";
+	if (clamped < 90_000) return `${Math.round(clamped / 1000)}s`;
+	if (clamped < 90 * 60_000) return `${Math.round(clamped / 60_000)}m`;
+	return `${Math.round(clamped / 3_600_000)}h`;
+}
+
+function formatPeerCard(card: FabricPeerCard): string {
+	const model = card.model?.split("/").pop();
+	const bits = [card.label];
+	if (model) bits.push(model);
+	bits.push(card.status, `started ${relativeAge(Date.now() - card.startedAt)} ago`);
+	return `${card.status === "running" ? "●" : "○"} ${bits.join(" · ")}`;
+}
+
 function queuesWhileStopped(command: QueuedCommand | undefined): boolean {
-	return command?.kind === "new" || command?.kind === "model" || command?.kind === "fabric-prewalk";
+	return command?.kind === "new" || command?.kind === "model" || command?.kind === "fabric-prewalk" || command?.kind === "fabric-await";
 }
 
 function availableModels(context: ExtensionContext): Model<Api>[] {
@@ -340,7 +366,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let renderingInline = false;
 	let paused = false;
 	let settingsManager: SettingsManager | undefined;
-	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | undefined;
+	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | "fabric-await" | undefined;
+	let fabricAwaitAbort: AbortController | undefined;
+	let fabricAwaitNote = "";
 	let pendingNewRowId: string | undefined;
 	let plannedNewSession = false;
 	let compactionFinishTimer: ReturnType<typeof setTimeout> | undefined;
@@ -478,6 +506,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				renderInlineEditor,
 				paused,
 				idle: ctx.isIdle(),
+				awaitNote: blockingActivity === "fabric-await" ? fabricAwaitNote : undefined,
 				modes: queueModes(),
 				theme,
 			}),
@@ -547,11 +576,15 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const pauseControlCommand = (
 		ctx: ExtensionContext,
 		item: QueuedMessage<ImageContent>,
-		activity: "new" | "model" | "fabric-prewalk",
+		activity: "new" | "model" | "fabric-prewalk" | "fabric-await",
 		error: unknown,
 	): void => {
 		if (blockingActivity !== activity || !queue.get(item.id)) return;
 		blockingActivity = undefined;
+		if (activity === "fabric-await") {
+			fabricAwaitAbort = undefined;
+			fabricAwaitNote = "";
+		}
 		if (activity === "new") {
 			pendingNewRowId = undefined;
 			plannedNewSession = false;
@@ -568,9 +601,13 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const finishControlCommand = (
 		ctx: ExtensionContext,
 		item: QueuedMessage<ImageContent>,
-		activity: "model" | "fabric-prewalk",
+		activity: "model" | "fabric-prewalk" | "fabric-await",
 	): void => {
 		if (blockingActivity !== activity || !queue.get(item.id)) return;
+		if (activity === "fabric-await") {
+			fabricAwaitAbort = undefined;
+			fabricAwaitNote = "";
+		}
 		queue.remove(item.id);
 		blockingActivity = undefined;
 		paused = false;
@@ -630,6 +667,46 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return true;
 	};
 
+	const executeFabricAwaitRow = (
+		ctx: ExtensionContext,
+		item: QueuedMessage<ImageContent>,
+		command: Extract<QueuedCommand, { kind: "fabric-await" }>,
+	): boolean => {
+		blockingActivity = "fabric-await";
+		fabricAwaitNote = command.peer ? `waiting for ${command.peer} to settle` : "waiting for peers to settle";
+		const controller = new AbortController();
+		fabricAwaitAbort = controller;
+		renderQueue(ctx);
+		const result = requestFabricPeerAwait(
+			pi,
+			ctx,
+			{ ...(command.peer ? { peer: command.peer } : {}), signal: controller.signal },
+			(progress) => {
+				if (blockingActivity !== "fabric-await") return;
+				fabricAwaitNote = progress.waiting.length === 0
+					? "peers settling"
+					: `waiting for ${progress.waiting.map((w) => `${w.label} (${w.status})`).join(", ")}`;
+				renderQueue(ctx);
+			},
+		);
+		if (!result) {
+			fabricAwaitAbort = undefined;
+			fabricAwaitNote = "";
+			pauseControlCommand(
+				ctx,
+				item,
+				"fabric-await",
+				"no compatible Pi Fabric listener is installed (requires pi-fabric 0.64.0 or newer)",
+			);
+			return false;
+		}
+		void result.then((response) => {
+			if (response.ok) finishControlCommand(ctx, item, "fabric-await");
+			else pauseControlCommand(ctx, item, "fabric-await", response.error);
+		});
+		return true;
+	};
+
 	// Execute the command row at the lane head. Only called when the agent is idle.
 	const executeCommandRow = (ctx: ExtensionContext, lane: QueueLane): boolean => {
 		const next = queue.peek(lane);
@@ -638,6 +715,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (!command) return false;
 		if (command.kind === "model") return executeModelRow(ctx, next, command);
 		if (command.kind === "fabric-prewalk") return executeFabricPrewalkRow(ctx, next);
+		if (command.kind === "fabric-await") return executeFabricAwaitRow(ctx, next, command);
 		if (command.kind === "new") {
 			blockingActivity = "new";
 			pendingNewRowId = next.id;
@@ -999,6 +1077,23 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 					}
 				}
 
+				if (matchesKey(data, AWAIT_PEERS_KEY)) {
+					if (editSession) {
+						ctx.ui.notify("Finish editing rows before changing the peer gate", "warning");
+					} else {
+						void armPeerGate(ctx);
+					}
+					return;
+				}
+				if (
+					blockingActivity === "fabric-await"
+					&& keybindings.matches(data, "app.interrupt")
+					&& !isShowingAutocomplete()
+				) {
+					// Explicitly abandon the peer wait; the gate row pauses in place.
+					fabricAwaitAbort?.abort();
+					return;
+				}
 				if (keybindings.matches(data, "app.message.followUp")) {
 					const text = (editor.getExpandedText?.() ?? editor.getText()).trim();
 					if (isCompacting() && parseQueuedCommand(text)) {
@@ -1082,7 +1177,68 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		renderQueue(ctx);
 	};
 
-	const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): void => {
+		/**
+	 * Option+W: toggle a /fabric await gate row. With no gate queued, fetch live
+	 * peer cards and enqueue one (targeted when peers exist); with a gate queued,
+	 * remove it. Enqueueing a gate unparks dispatch: rows ahead flush normally and
+	 * the gate holds the tail until the selected peers settle.
+	 */
+	const armPeerGate = async (ctx: ExtensionContext): Promise<void> => {
+		if (blockingActivity === "fabric-await") {
+			ctx.ui.notify("A peer settle gate is already running; Escape cancels it", "warning");
+			return;
+		}
+		const gates = queue.snapshot().filter(
+			(item) => parseQueuedCommand(item.text)?.kind === "fabric-await",
+		);
+		if (gates.length > 0) {
+			for (const gate of gates) queue.remove(gate.id);
+			renderQueue(ctx);
+			ctx.ui.notify(
+				gates.length === 1 ? "Removed the peer settle gate" : `Removed ${gates.length} peer settle gates`,
+				"info",
+			);
+			return;
+		}
+		const request = requestFabricPeerCards(pi, ctx);
+		if (!request) {
+			ctx.ui.notify("Peer queuing requires pi-fabric 0.64.0 or newer", "error");
+			return;
+		}
+		const result = await request;
+		if (blockingActivity || editSession) {
+			renderQueue(ctx);
+			return;
+		}
+		if (!result.ok) {
+			ctx.ui.notify(`Could not list Fabric peers: ${result.error}`, "error");
+			return;
+		}
+		const cards = result.cards;
+		let label: string | undefined;
+		if (cards.length === 1) {
+			label = cards[0]!.label;
+		} else if (cards.length > 1) {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("Multiple peers detected; picking one needs an interactive session", "warning");
+				return;
+			}
+			const allPeers = `All ${cards.length} peers (project quiet)`;
+			const options = [allPeers, ...cards.map(formatPeerCard)];
+			const selected = await ctx.ui.select("Hold the queue until these peers settle", options);
+			if (!selected) return;
+			if (selected !== allPeers) label = cards[options.indexOf(selected) - 1]?.label;
+		}
+		queue.enqueue("followUp", label ? `/fabric await ${label}` : "/fabric await");
+		paused = false;
+		renderQueue(ctx);
+		if (cards.length === 0) {
+			ctx.ui.notify("No live peers on this project mesh; the gate resolves immediately", "info");
+		}
+		if (ctx.isIdle() && !blockingActivity && !editSession) dispatchFromIdle(ctx);
+	};
+
+const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): void => {
 		const guarded = editor as EditorComponent & { [SUBMIT_GUARD]?: boolean };
 		if (guarded[SUBMIT_GUARD]) return;
 		guarded[SUBMIT_GUARD] = true;
@@ -1336,6 +1492,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		compactionFinishTimer = undefined;
 		editSession = undefined;
 		settingsManager = undefined;
+		fabricAwaitAbort?.abort();
+		fabricAwaitAbort = undefined;
+		fabricAwaitNote = "";
 		paused = false;
 		blockingActivity = undefined;
 		pendingNewRowId = undefined;

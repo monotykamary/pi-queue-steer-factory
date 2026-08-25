@@ -25,14 +25,14 @@ pi install npm:pi-fabric
 Pin the current releases when you want reproducible installs:
 
 ```bash
-pi install npm:pi-queue-steer-factory@0.4.0
-pi install npm:pi-fabric@0.62.7
+pi install npm:pi-queue-steer-factory@0.6.0
+pi install npm:pi-fabric@0.64.0
 ```
 
 The GitHub package is also installable directly:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.4.0
+pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.6.0
 ```
 
 Then start a new Pi session or run `/reload`.
@@ -59,8 +59,14 @@ The extension follows your configured Pi action bindings. These are the default 
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
 | Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, or `/fabric prewalk` visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
+| Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
+| Peer gate waiting | `Escape` | Cancel the wait and pause the gate row |
 
-`Option+Down`, `Option+X`, `Option+T` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
+`Option+Down`, `Option+W`, `Option+X`, `Option+T` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
+
+## Peer settle gates
+
+When another Pi Fabric session is running in the same project, queue the edit work and hold it behind a gate until that peer settles. Press `Option+W` (or queue `/fabric await [LABEL]` by hand) to add a gate row: with one live peer it targets that peer directly, with several it offers an all-peers default plus per-peer cards (`● PQS-1 · gpt-5.4 · running · started 6m ago`, with Linear-style project labels that are never reused). Rows queued behind the gate dispatch as soon as every watched peer has settled and stayed quiet briefly; peers that leave the mesh count as settled. `Escape` cancels an active wait and pauses the gate row; `Option+W` again removes a queued gate. Requires pi-fabric 0.64.0 or newer.
 
 ## Delivery semantics
 
@@ -78,7 +84,7 @@ The extension hands messages back to Pi’s native queues only when their delive
 
 ## Queueing while stopped
 
-With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, and exact `/fabric prewalk` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
+With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
 
 A plain `Enter` still runs every command immediately. With `Option+Enter`, other Pi built-ins, other extension commands, unknown slash input and `!` bash keep passing straight through.
 
@@ -90,12 +96,13 @@ Arbitrary commands are intentionally not replayed. The supported command rows ha
 
 ## Command rows
 
-Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, or exact `/fabric prewalk` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
+Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, exact `/fabric prewalk`, or `/fabric await [label]` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
 
 - `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, and `/fabric prewalk` paused
 - a command row executes only once the agent is idle; rows behind it wait
 - `/model provider/model` resolves an exact available model; bare or non-exact `/model` opens a filtered picker, and cancellation or authentication failure restores and pauses the row
 - exact `/fabric prewalk` waits for Pi Fabric to acknowledge that prewalk is armed before the next row can run; it requires Pi Fabric 0.62.7 or newer
+- `/fabric await [label]` holds the tail until every watched peer session on the project mesh settles (a quiet window after its last observed run) or leaves the mesh; it requires Pi Fabric 0.64.0 or newer. Controls and watch state show on the row (`waiting for PQS-1 (running)`)
 - `/new` starts a fresh session and transfers its committed tail to that replacement runtime without adding rows to either transcript; the tail continues automatically, while reopening a persisted queue still starts paused
 - `/reload` runs Pi’s built-in reload; committed trailing rows retain their IDs, lanes, attachments and pause state across the runtime swap
 - idle `/compact` uses Pi’s public compaction API so queued rows resume when compaction finishes; a start failure restores and pauses the command row

@@ -6,7 +6,8 @@ export type QueuedCommand =
 	| { kind: "reload" }
 	| { kind: "new" }
 	| { kind: "model"; target?: string }
-	| { kind: "fabric-prewalk" };
+	| { kind: "fabric-prewalk" }
+	| { kind: "fabric-await"; peer?: string };
 
 /**
  * Parse row text as a queueable command. Commands are recognised at dispatch
@@ -22,6 +23,10 @@ export function parseQueuedCommand(text: string): QueuedCommand | undefined {
 		return { kind: "model", target: target || undefined };
 	}
 	if (/^\/fabric\s+prewalk$/.test(trimmed)) return { kind: "fabric-prewalk" };
+	const fabricAwait = /^\/fabric\s+await(?:\s+(\S+))?$/.exec(trimmed);
+	if (fabricAwait) {
+		return { kind: "fabric-await", ...(fabricAwait[1] ? { peer: fabricAwait[1] } : {}) };
+	}
 	if (trimmed === "/compact") return { kind: "compact" };
 	if (trimmed.startsWith("/compact ")) {
 		const instructions = trimmed.slice("/compact ".length).trim();
