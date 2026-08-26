@@ -1349,8 +1349,6 @@ test("parks queued rows when the agent run ends in an error, across the settle",
 	});
 	assert.equal(harness.sent.length, 0);
 	assert.match(renderWidget(harness), /paused/);
-	assert.equal(harness.notifications.at(-1)?.level, "warning");
-	assert.match(harness.notifications.at(-1)?.message ?? "", /queue paused/);
 
 	// A bare settle must not flush rows into the failed session: the rows stay
 	// parked for a retry mechanism, or for an explicit empty-composer Enter.
@@ -1380,10 +1378,10 @@ test("releases the error hold at the first healthy tail after recovery", async (
 	await waitFor(() => harness.sent.length === 1);
 	assert.equal(harness.sent[0]?.content, "after recovery");
 
-	// A repeated failed hold only notifies and pauses once.
+	// The error hold is silent: it never surfaces a notification.
 	assert.equal(
 		harness.notifications.filter(({ message }) => message.includes("queue paused")).length,
-		1,
+		0,
 	);
 	await harness.emit("agent_settled");
 	assert.equal(harness.sent.length, 1);

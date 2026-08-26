@@ -430,10 +430,6 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (!paused) {
 			errorHold = true;
 			paused = true;
-			ctx.ui.notify(
-				"Agent run stopped with an error; queue paused — it resumes automatically once the run recovers",
-				"warning",
-			);
 		}
 		renderQueue(ctx);
 	};
