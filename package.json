@@ -25,6 +25,7 @@
   "files": [
     "index.ts",
     "editor-render.ts",
+    "fabric-peers.ts",
     "fabric-prewalk.ts",
     "queue-state.ts",
     "queued-input.ts",
