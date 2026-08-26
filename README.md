@@ -109,14 +109,14 @@ Arbitrary commands are intentionally not replayed. The supported command rows ha
 Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, exact `/fabric prewalk`, or `/fabric await [label]` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
 
 - `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, and `/fabric prewalk` paused
-- a command row executes only once the agent is idle; rows behind it wait
+- lane timing is uniform: a steered command row executes at the next turn boundary — mid-run, exactly as if typed there — and a queued (follow-up) command row runs when the run settles; rows behind an executing command wait for it
 - `/model provider/model` resolves an exact available model; bare or non-exact `/model` opens a filtered picker, and cancellation or authentication failure restores and pauses the row
 - exact `/fabric prewalk` waits for Pi Fabric to acknowledge that prewalk is armed before the next row can run; it requires Pi Fabric 0.62.7 or newer
 - `/fabric await [label]` holds the tail until every watched peer session on the project mesh settles (a quiet window after its last observed run) or leaves the mesh; it requires Pi Fabric 0.64.0 or newer. Controls and watch state show on the row (`waiting for PQS-1 (running)`)
 - `/new` starts a fresh session and transfers its committed tail to that replacement runtime without adding rows to either transcript; the tail continues automatically, while reopening a persisted queue still starts paused
 - `/reload` runs Pi’s built-in reload; committed trailing rows retain their IDs, lanes, attachments and pause state across the runtime swap
-- idle `/compact` uses Pi’s public compaction API so queued rows resume when compaction finishes; a start failure restores and pauses the command row
-- `/reload` submitted while the agent works or tracked compaction runs stays queued instead of showing Pi's built-in wait warning
+- a queued `/compact` runs at settle via Pi’s public compaction API and trailing rows resume when compaction finishes; steered, it fires at the next turn boundary and aborts the in-flight run the way a live `/compact` does — a start failure restores and pauses the command row
+- `/reload` queued as a follow-up runs at settle, sidestepping Pi's built-in busy wait warning; steered, it fires at the next turn boundary and Pi's own busy handling applies
 - `Enter` on `/compact` while the agent works uses Pi's public compaction API and holds visible rows until compaction settles
 - ordinary messages submitted during compaction remain in Pi's native queue and can run before extension-owned command rows after compaction finishes
 - stopped `Option+Enter` still executes `/compact` and `/reload` immediately; only the new Factory controls park paused
@@ -145,7 +145,7 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 - during a run, the combined message reaches Pi as one steering message
 - while stopped, the combined message starts a new run directly
 - a mid-turn drain lands inside the in-flight call's context when the turn has not responded yet, or as the next steering turn once it has — either way the transcript records the combined message exactly once
-- command rows are not messages: `/compact`, `/reload`, `/new`, `/model`, and `/fabric prewalk` stay queued and execute at their control boundaries
+- command rows are not messages: `/compact`, `/reload`, `/new`, `/model`, and `/fabric prewalk` stay queued and execute at their lane's dispatch boundary
 - an active row-editing session refuses the drain, so rows are never pulled away mid-draft
 - a synchronous hand-off failure restores every row, in order, and pauses the queue
 

@@ -586,9 +586,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		);
 	};
 
-	// Message rows only; command rows never dispatch at active-run boundaries.
-	// A command row at the lane head holds everything behind it (FIFO) until the
-	// agent settles and dispatchFromIdle executes it.
+	// Message rows only; dispatchLaneAtBoundary executes a steered head command
+	// row itself, and follow-up command rows wait for agent_settled. A command
+	// row stops the batch (FIFO): rows behind it dispatch after the control.
 	const takeLaneBatch = (lane: QueueLane): QueuedMessage<ImageContent>[] => {
 		if (paused || blockingActivity || queue.laneLength(lane) === 0 || laneIsHeld(lane)) return [];
 		const isMessage = (item: QueuedMessage<ImageContent>) => itemCommand(item) === undefined;
@@ -638,6 +638,18 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 	const dispatchLaneAtBoundary = async (ctx: ExtensionContext, lane: QueueLane): Promise<boolean> => {
 		activeContext = ctx;
+		// Lane timing is uniform for message and command rows: a steered row
+		// dispatches at the next turn boundary, so a steered command executes
+		// mid-run exactly as if typed there. Follow-up command rows keep their
+		// settle boundary and run from dispatchFromIdle.
+		const head = queue.peek(lane);
+		if (lane === "steer" && head && itemCommand(head)) {
+			if (paused || blockingActivity || laneIsHeld(lane)) {
+				renderQueue(ctx);
+				return false;
+			}
+			return executeCommandRow(ctx, lane);
+		}
 		const items = takeLaneBatch(lane);
 		if (items.length === 0) {
 			renderQueue(ctx);
@@ -780,7 +792,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return true;
 	};
 
-	// Execute the command row at the lane head. Only called when the agent is idle.
+	// Execute the command row at the lane head: at idle from dispatchFromIdle,
+	// or mid-run when a steered command reaches a turn boundary.
 	const executeCommandRow = (ctx: ExtensionContext, lane: QueueLane): boolean => {
 		const next = queue.peek(lane);
 		if (!next) return false;
@@ -958,7 +971,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	 * Explicit flush: compose every queued message row into one message in
 	 * timeline order and send it at once — as native steering during a run, or
 	 * as the prompt that starts the run from idle. Command rows are not
-	 * messages: they stay queued to execute when the agent is idle.
+	 * messages: they stay queued and run at their lane's dispatch boundary.
 	 */
 	const drainAll = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
@@ -1521,7 +1534,13 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	pi.on("turn_end", async (event, ctx) => {
 		activeContext = ctx;
 		if (event.message.role === "assistant" && event.message.stopReason === "aborted") {
-			if (queue.length > 0 && blockingActivity !== "compact") pauseQueue();
+			// A blocking control owns the abort tail it produced — a steered
+			// /compact, /new or /reload firing mid-run aborts the in-flight run
+			// on purpose. Only a bare user abort, or one under Pi-initiated
+			// auto-compaction, parks the queue.
+			if (queue.length > 0 && (blockingActivity === undefined || blockingActivity === "auto-compact")) {
+				pauseQueue();
+			}
 			renderQueue(ctx);
 			return;
 		}

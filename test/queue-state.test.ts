@@ -1261,6 +1261,67 @@ test("owns busy manual compaction so its abort does not pause queued rows", asyn
 	assert.equal(harness.sent[0]?.content, "continue after compact");
 });
 
+test("executes a steered /compact at the next turn boundary and resumes the tail", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(false);
+	await enqueue(harness, "steer", "/compact tighten the notes");
+	await enqueue(harness, "steer", "continue after compact");
+
+	// The compaction fires mid-run at the turn boundary, as if typed there.
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.compactCalls[0]?.customInstructions, "tighten the notes");
+	assert.equal(harness.sent.length, 0);
+
+	// The compaction's abort tail belongs to the control, not the user.
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "aborted" } });
+	assert.doesNotMatch(renderWidget(harness), /paused/);
+
+	harness.setIdle(true);
+	harness.compactCalls[0]?.onComplete?.({
+		summary: "summary",
+		firstKeptEntryId: "entry-1",
+		tokensBefore: 100,
+		estimatedTokensAfter: 20,
+	});
+	await waitFor(() => harness.sent.length === 1);
+	assert.equal(harness.sent[0]?.content, "continue after compact");
+	assert.equal(harness.sent[0]?.options, undefined);
+});
+
+test("executes a steered /reload at the next turn boundary and owns its abort tail", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	harness.setIdle(false);
+	await enqueue(harness, "steer", "/reload");
+	await enqueue(harness, "steer", "after reload");
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	await waitFor(() => harness.submitted.includes("/reload"));
+
+	// A reload-triggered abort must not park the trailing rows.
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "aborted" } });
+	assert.doesNotMatch(renderWidget(harness), /paused/);
+});
+
+test("keeps a follow-up /compact queued until the run settles", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(false);
+	await enqueue(harness, "followUp", "/compact settle first");
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.compactCalls.length, 0);
+	await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [] }] });
+	assert.equal(harness.compactCalls.length, 0);
+
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	assert.equal(harness.compactCalls.length, 1);
+	assert.equal(harness.compactCalls[0]?.customInstructions, "settle first");
+});
+
 test("restores and pauses a command row when compaction cannot start", async () => {
 	const harness = createHarness({ compactStartError: new Error("cannot start") });
 	await harness.emit("session_start");
