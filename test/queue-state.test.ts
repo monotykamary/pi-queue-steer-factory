@@ -1358,6 +1358,53 @@ test("parks queued rows when the agent run ends in an error, across the settle",
 	assert.match(renderWidget(harness), /paused/);
 });
 
+test("holds steering rows at an error turn instead of injecting them into recovery", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "steer", "steer after the error");
+
+	// turn_end fires before agent_end, where the error hold is set. Delivering
+	// here would inject the row into the failed run's native steering — or the
+	// retry or compaction that follows — jumping it ahead of that recovery.
+	await harness.emit("turn_end", {
+		message: { role: "assistant", stopReason: "error", errorMessage: "boom" },
+	});
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /steer after the error/);
+
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "error", errorMessage: "boom", content: [] }],
+	});
+	assert.match(renderWidget(harness), /paused/);
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 0);
+
+	// Recovery produced a healthy tail: the hold lifts and the parked steering
+	// row flows through the normal boundary dispatch, exactly once.
+	await harness.emit("agent_end", {
+		messages: [{ role: "assistant", stopReason: "stop", content: [] }],
+	});
+	assert.deepEqual(harness.sent, [
+		{ content: "steer after the error", options: { deliverAs: "steer" } },
+	]);
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 1);
+});
+
+test("holds steering rows at an overflow turn as well as an error", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+	await enqueue(harness, "steer", "steer after overflow");
+
+	await harness.emit("turn_end", {
+		message: { role: "assistant", stopReason: "error", errorMessage: "prompt is too long" },
+	});
+	assert.equal(harness.sent.length, 0);
+	assert.match(renderWidget(harness), /steer after overflow/);
+});
+
 test("releases the error hold at the first healthy tail after recovery", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");

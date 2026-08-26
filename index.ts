@@ -1526,6 +1526,21 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			return;
 		}
 		if (paused) return;
+		// turn_end runs before agent_end, where a failed tail parks the queue
+		// behind an error hold. Dispatching a steer row at a failed turn would
+		// inject it into the failed run's native steering — or the retry or
+		// compaction that follows — jumping it ahead of the recovery the hold
+		// exists to protect. Hold it for the agent_end classification instead.
+		if (
+			event.message.role === "assistant"
+			&& (
+				event.message.stopReason === "error"
+				|| isContextOverflow(event.message, ctx.model?.contextWindow ?? 0)
+			)
+		) {
+			renderQueue(ctx);
+			return;
+		}
 		await dispatchLaneAtBoundary(ctx, "steer");
 	});
 
