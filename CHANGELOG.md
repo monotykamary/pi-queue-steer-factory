@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4 - 2026-08-26
+
+### Fixed
+
+- The published npm tarball now includes `fabric-peers.ts`: the peer-gate module was left out of the `files` whitelist in `package.json`, so installs from npm shipped an `index.ts` that imports `./fabric-peers.ts` without the file itself, and the extension failed to load with `Cannot find module './fabric-peers.ts'`.
+
 ## 0.8.3 - 2026-08-26
 
 ### Fixed
