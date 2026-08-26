@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 - 2026-08-26
+
+### Changed
+
+- Command rows now follow their lane's timing instead of a command-specific idle-only rule: a steered `/compact`, `/reload`, `/new`, `/model`, `/fabric prewalk` or `/fabric await` executes at the next turn boundary, mid-run, exactly as if typed there, while follow-up command rows still run when the run settles. Mid-run compaction therefore aborts the in-flight run the same way a live `/compact` does — the consequence is the caller's, by design — and every extension-run control now owns its abort tail (previously only `/compact` did), so a control-triggered abort no longer parks the queue. Aborts under Pi-initiated auto-compaction still park it.
+
 ## 0.8.4 - 2026-08-26
 
 ### Fixed
