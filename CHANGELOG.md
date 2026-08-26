@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 - 2026-08-26
+
+### Changed
+
+- The error hold no longer raises a warning notification when a failed run tail pauses the queue; the widget still shows the paused state and the hold releases the same way it did before.
+
 ## 0.8.1 - 2026-08-25
 
 ### Fixed
