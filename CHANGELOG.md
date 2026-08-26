@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.3 - 2026-08-26
+
+### Fixed
+
+- Steering rows no longer leak into failed runs: `turn_end` fires before `agent_end`, where an error or context-overflow tail parks the queue behind the error hold, so a row dispatched at that boundary was injected into the failed run's native steering — or into the retry or compaction cycle that followed — jumping ahead of the recovery the hold exists to protect. The turn boundary dispatch now applies the same failed-tail classification `agent_end` uses, and the held row flows at the first healthy assistant tail instead.
+
 ## 0.8.2 - 2026-08-26
 
 ### Changed
