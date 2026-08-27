@@ -1245,8 +1245,17 @@ test("owns busy manual compaction so its abort does not pause queued rows", asyn
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "continue after compact");
 
+	// Busy: a typed /compact parks as a steer row instead of cutting the live
+	// turn; compaction starts at the next turn boundary.
 	harness.editor.onSubmit?.("/compact preserve the queue");
+	assert.equal(harness.compactCalls.length, 0);
+	assert.match(renderWidget(harness), /\/compact/);
+	assert.match(renderWidget(harness), /continue after compact/);
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.equal(harness.compactCalls[0]?.customInstructions, "preserve the queue");
+
+	// The compaction's abort tail belongs to the control, not the user.
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "aborted" } });
 	assert.doesNotMatch(renderWidget(harness), /paused/);
 
@@ -1259,6 +1268,28 @@ test("owns busy manual compaction so its abort does not pause queued rows", asyn
 	});
 	await waitFor(() => harness.sent.length === 1);
 	assert.equal(harness.sent[0]?.content, "continue after compact");
+});
+
+test("parks a mid-run Enter on /new as a steer row until the turn boundary", async () => {
+	const harness = createHarness({ newSession: async () => ({ cancelled: true }) });
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "still here");
+
+	// Busy: a typed /new parks as a steer row instead of replacing the session
+	// over live tool work; the handoff runs at the next turn boundary.
+	harness.editor.onSubmit?.("/new");
+	assert.equal(harness.newSessionCalls, 0);
+	assert.match(renderWidget(harness), /\/new/);
+	assert.match(renderWidget(harness), /still here/);
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	await waitFor(() => harness.newSessionCalls === 1);
+
+	// A cancelled handoff restores and pauses the row, mid-run or not.
+	await waitFor(() => harness.notifications.some(({ message }) => message.includes("new session cancelled")));
+	assert.match(renderWidget(harness), /\/new/);
+	assert.match(renderWidget(harness), /still here/);
+	assert.match(renderWidget(harness), /paused/);
 });
 
 test("executes a steered /compact at the next turn boundary and resumes the tail", async () => {

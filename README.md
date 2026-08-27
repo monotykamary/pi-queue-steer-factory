@@ -115,9 +115,9 @@ Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [t
 - `/fabric await [label]` holds the tail until every watched peer session on the project mesh settles (a quiet window after its last observed run) or leaves the mesh; it requires Pi Fabric 0.64.0 or newer. Controls and watch state show on the row (`waiting for PQS-1 (running)`)
 - `/new` starts a fresh session and transfers its committed tail to that replacement runtime without adding rows to either transcript; the tail continues automatically, while reopening a persisted queue still starts paused
 - `/reload` runs Pi’s built-in reload; committed trailing rows retain their IDs, lanes, attachments and pause state across the runtime swap
-- a queued `/compact` runs at settle via Pi’s public compaction API and trailing rows resume when compaction finishes; steered, it fires at the next turn boundary and aborts the in-flight run the way a live `/compact` does — a start failure restores and pauses the command row
+- a queued `/compact` runs at settle via Pi’s public compaction API and trailing rows resume when compaction finishes; steered, it fires at the next turn boundary and aborts the in-flight run on purpose — a start failure restores and pauses the command row
 - `/reload` queued as a follow-up runs at settle, sidestepping Pi's built-in busy wait warning; steered, it fires at the next turn boundary and Pi's own busy handling applies
-- `Enter` on `/compact` while the agent works uses Pi's public compaction API and holds visible rows until compaction settles
+- plain `Enter` on `/compact` or `/new` while the agent works parks it as a steer row instead of firing instantly: it runs at the next turn boundary — after the turn's in-flight tool results land — and the extension owns the abort tail; from idle, both still start immediately and a started compaction holds visible rows until it settles
 - ordinary messages submitted during compaction remain in Pi's native queue and can run before extension-owned command rows after compaction finishes
 - stopped `Option+Enter` still executes `/compact` and `/reload` immediately; only the new Factory controls park paused
 - unsupported command forms, including `/fabric prewalk <task>`, are not control rows; queue exact `/fabric prewalk` and the task as separate rows

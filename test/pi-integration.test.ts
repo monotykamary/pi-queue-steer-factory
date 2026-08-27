@@ -297,6 +297,97 @@ test("real failed manual compaction releases the following row without adding a 
 
 test("real retry finishes before the extension releases its queued follow-up", async () => {
 	const harness = await createIntegrationHarness({ retryEnabled: true });
+test("real steered /compact waits for the in-flight tool and fires at the turn boundary", async () => {
+	let releaseToolGate: (() => void) | undefined;
+	const toolGate = new Promise<void>((resolve) => {
+		releaseToolGate = resolve;
+	});
+	const gateToolExtension: ExtensionFactory = (pi) => {
+		pi.registerTool({
+			name: "gate_tool",
+			label: "Gate tool",
+			description: "Blocks until the test releases it",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await toolGate;
+				return { content: [{ type: "text", text: "gate tool finished cleanly" }], details: undefined };
+			},
+		});
+	};
+	const harness = await createIntegrationHarness({
+		extraExtensions: [gateToolExtension],
+		tools: ["gate_tool"],
+	});
+	const trace: string[] = [];
+	let gateToolStarted = false;
+	harness.session.subscribe((event) => {
+		if (event.type === "tool_execution_start" && event.toolName === "gate_tool") gateToolStarted = true;
+		trace.push(event.type);
+	});
+	try {
+		await seedSession(harness);
+		harness.faux.setResponses([
+			fauxAssistantMessage([fauxText("calling the gate tool"), fauxToolCall("gate_tool", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("steered compaction summary"),
+			fauxAssistantMessage("steered split-turn summary"),
+			fauxAssistantMessage("post-compaction reply"),
+		]);
+		const runStarted = nextAgentStart(harness.session);
+		const run = harness.session.prompt("call the gate tool");
+		await within(runStarted, () => trace.join(", "));
+		await within(
+			(async () => {
+				while (!gateToolStarted) await new Promise((resolve) => setTimeout(resolve, 5));
+			})(),
+			() => "gate tool did not start",
+		);
+
+		// Steered mid-run, /compact parks behind the in-flight tool instead of
+		// cutting it; a follow-up row observes the queue after compaction.
+		await harness.session.prompt("/compact steered evidence", { streamingBehavior: "steer" });
+		await harness.session.prompt("post-compaction row", { streamingBehavior: "followUp" });
+		const compactionEnded = nextCompactionEnd(harness.session);
+		const postRowRun = nextAgentRunForUser(harness.session, "post-compaction row");
+
+		// While the tool gate holds, compaction must not start: the queued row
+		// waits for the turn boundary, and the turn ends only after the tool
+		// result lands.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(trace.includes("compaction_start"), false, trace.join(", "));
+		assert.equal(harness.session.isStreaming, true);
+		assert.equal(globalThis.__tmustierPiQueueSteerState?.pending, 2);
+
+		releaseToolGate?.();
+		await within(run, () => trace.join(", "));
+		const compaction = await within(compactionEnded, () => trace.join(", "));
+		await within(postRowRun, () => trace.join(", "));
+
+		// The tool finished and its result landed before summarization began;
+		// compaction then trimmed it from the live history view exactly as a
+		// normally-finished compaction would.
+		assert.ok(
+			trace.indexOf("tool_execution_end") < trace.indexOf("compaction_start"),
+			trace.join(", "),
+		);
+		assert.ok(
+			JSON.stringify(harness.session.sessionManager.getEntries()).includes("gate tool finished cleanly"),
+		);
+
+		// Compaction ran as the extension-started manual compaction, and its
+		// abort tail never parked the queue: the parked row flowed on its own.
+		assert.equal(compaction.reason, "manual");
+		assert.equal(compaction.result?.summary.includes("steered compaction summary"), true);
+		assert.equal(harness.session.sessionManager.getEntries().filter((entry) => entry.type === "compaction").length, 1);
+		assert.equal(userTexts(harness.session).filter((text) => text === "post-compaction row").length, 1);
+		assert.equal(harness.session.getLastAssistantText(), "post-compaction reply");
+		assert.equal(globalThis.__tmustierPiQueueSteerState?.pending, 0);
+	} finally {
+		releaseToolGate?.();
+		await harness.cleanup();
+		globalThis.__tmustierPiQueueSteerState = undefined;
+	}
+});
+
 	try {
 		const trace: string[] = [];
 		harness.session.subscribe((event) => trace.push(event.type));

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Pressing `Enter` on `/compact` or `/new` mid-run no longer fires instantly: the editor submit guard parks the row in the steer lane, so the turn's in-flight tool calls finish, their results land, and the control runs at the next turn boundary — a mid-run `/new` previously replaced the session over live tool work. The abort tails these controls produce stay owned by the extension and never park the queue. From an idle composer both still start immediately, and `Option+Enter` queueing is unchanged.
+
+### Fixed
+
+- A compaction that aborted a live run could strand its trailing rows on two rails: Pi settles the aborted run before summarization starts, and that early `agent_settled` concluded the blocking activity early, so the real completion callback no longer released the hold — an extension-started compaction now concludes only from its completion signal. And an abort that lands before the first streamed chunk of the next turn surfaces as an error-shaped tail ("This operation was aborted") rather than an `aborted` one, which `agent_end` then parked as a run failure; control rows in flight now own that tail shape too.
+
 ## 0.9.0 - 2026-08-26
 
 ### Changed

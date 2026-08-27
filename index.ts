@@ -394,6 +394,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// the error hold stays parked for an explicit Enter instead of releasing at
 	// the compaction settle.
 	let compactionRecoveryFailed = false;
+	let extensionCompactionInFlight = false;
 	// Only an overflow compaction recovers a run that died with context
 	// overflow; a threshold compaction after an error is context housekeeping
 	// and must not release the error hold.
@@ -966,12 +967,18 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 		return sendHeadMessage(ctx, "followUp", ctx.isIdle() ? undefined : "steer");
 	};
+					extensionCompactionInFlight = false;
 
 	/**
 	 * Explicit flush: compose every queued message row into one message in
+					extensionCompactionInFlight = false;
 	 * timeline order and send it at once — as native steering during a run, or
 	 * as the prompt that starts the run from idle. Command rows are not
 	 * messages: they stay queued and run at their lane's dispatch boundary.
+			// Pi settles the run this compaction aborted before the compaction
+			// itself runs; that settle must not conclude the activity, so only
+			// the completion callbacks above may finish it from here on.
+			extensionCompactionInFlight = true;
 	 */
 	const drainAll = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
@@ -1384,7 +1391,28 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			const rowId = pendingNewRowId;
 			const row = rowId ? queue.get(rowId) : undefined;
 			if (blockingActivity !== "new" || !row) {
+				// Mid-run, park /compact as a steer row instead of cutting a live
+				// tool call: turn_end fires only after the turn's tool results
+				// land, so the row starts compaction at the next boundary. From
+				// idle there is nothing to wait for and it still starts instantly.
+				if (!ctx.isIdle()) {
+					queue.enqueue("steer", text, []);
+					resumeQueue();
+					renderQueue(ctx);
+					return;
+				}
 				commandContext.ui.notify("No queued /new handoff is pending", "warning");
+				return;
+			}
+			if (command?.kind === "new" && !editSession && !ctx.isIdle()) {
+				// Same mid-run rule as /compact: replacing the session would cut
+				// live tool work, so park it as a steer row and hand off at the
+				// next turn boundary instead. Idle /new keeps Pi's instant path.
+				editor.addToHistory?.(text);
+				editor.setText("");
+				queue.enqueue("steer", text, []);
+				resumeQueue();
+				renderQueue(ctx);
 				return;
 			}
 			plannedNewSession = true;
@@ -1620,8 +1648,13 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
+		// Pi shapes an abort that lands before the first streamed chunk as an
+		// error tail ("This operation was aborted"), which turn_end's aborted
+		// branch never sees. A control row in flight owns that tail, so it must
+		// not be classified — let alone parked — as a failed run.
 		activeContext = ctx;
 		if (blockingActivity === "compact" || blockingActivity === "auto-compact") {
+			&& !blockingActivity
 			const activity = blockingActivity;
 			if (nativeCompactionInputQueued && !nativeCompactionTurnStarted) {
 				renderQueue(ctx);
@@ -1658,6 +1691,13 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			const stash: RuntimeStash = { reason: "new", paused, rows: queue.snapshot() };
 			globalThis.__tmustierPiQueueSteerReloadStash = stash;
 		} else {
+		if (blockingActivity === "compact" && extensionCompactionInFlight) {
+			// An extension-started compaction aborts the run and Pi settles that
+			// abort before summarization even starts; the completion callback
+			// owns the finish, or the trailing rows would never dispatch.
+			renderQueue(ctx);
+			return;
+		}
 			globalThis.__tmustierPiQueueSteerReloadStash = undefined;
 			// Ordinary shutdowns leave committed rows in the outgoing session for
 			// a later paused resume. Intentional reload and queued /new handoffs use
@@ -1746,6 +1786,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	/** Re-adopt committed queue state after an intentional in-process runtime swap. */
 	function restoreRuntimeStash(reason: string, ctx: ExtensionContext): void {
 		const stash = globalThis.__tmustierPiQueueSteerReloadStash;
+		extensionCompactionInFlight = false;
 		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
 		const stashReason = stash?.reason ?? "reload";
 		if (!stash || reason !== stashReason) return;
