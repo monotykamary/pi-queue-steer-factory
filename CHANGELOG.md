@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.0 - 2026-08-27
+
+### Added
+
+- A queued `/new` now pins the outgoing session's model onto the replacement session before the transferred tail auto-dispatches. Pi resolves a fresh session's model from the shared saved default (the last model any session persisted) or the first scoped model, so a handoff could previously resume its tail under a different model — silently, whenever another session persisted a model, or whenever the current session's model differed from the saved default. A model that is no longer available warns and continues instead of pausing, matching Pi's own restore fallback.
+
 ## 0.11.0 - 2026-08-27
 
 ### Changed
