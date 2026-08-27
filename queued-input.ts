@@ -8,7 +8,7 @@ import {
 
 // getCommands() omits built-ins, which still take precedence over skill aliases.
 const PI_BUILTIN_COMMANDS = new Set([
-	"settings", "model", "scoped-models", "export", "import", "share", "copy", "name", "session",
+	"settings", "model", "scoped-models", "thinking", "export", "import", "share", "copy", "name", "session",
 	"changelog", "hotkeys", "fork", "clone", "tree", "trust", "login", "logout", "new", "compact",
 	"resume", "reload", "quit", "debug", "arminsayshi", "dementedelves",
 ]);

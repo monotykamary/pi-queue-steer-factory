@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `/thinking [level]` is now a queueable command row alongside `/model`: a mid-run `Option+Enter` or a queued flush sets Pi's thinking level through the clamped public API instead of pushing the text to the model as a prompt. Bare `/thinking` opens the level picker, an unknown level or a cancelled picker restores and pauses the row, and `Option+Enter` while stopped parks it paused like the other Factory controls. `thinking` also joins the built-in shadow set, so a prompt template or skill named `thinking` can no longer expand over it, and `/thinking` submitted during compaction defers into the extension queue instead of Pi's native post-compaction queue.
+
 ### Changed
 
 - Pressing `Enter` on `/compact` or `/new` mid-run no longer fires instantly: the editor submit guard parks the row in the steer lane, so the turn's in-flight tool calls finish, their results land, and the control runs at the next turn boundary — a mid-run `/new` previously replaced the session over live tool work. The abort tails these controls produce stay owned by the extension and never park the queue. From an idle composer both still start immediately, and `Option+Enter` queueing is unchanged.

@@ -42,7 +42,7 @@ export interface QueueSteerState {
 	pending: number;
 	/** Dispatch paused (aborted turn, failed preparation, agent error hold, or manual pause). */
 	paused: boolean;
-	/** A blocking control row (/compact, /model, /new, /reload, prewalk) is executing. */
+	/** A blocking control row (/compact, /model, /thinking, /new, /reload, prewalk) is executing. */
 	blocked: boolean;
 }
 
@@ -286,12 +286,16 @@ function mergedDrainContent(items: readonly QueuedMessage<ImageContent>[]): stri
 	return [{ type: "text", text }, ...images];
 }
 
+/** Canonical thinking levels, mirroring Pi's THINKING_LEVEL_OPTIONS order. */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 function commandLabel(command: QueuedCommand): string {
 	switch (command.kind) {
 		case "compact": return "/compact";
 		case "reload": return "/reload";
 		case "new": return "/new";
 		case "model": return "/model";
+		case "thinking": return "/thinking";
 		case "fabric-prewalk": return "/fabric prewalk";
 	case "fabric-await": return "/fabric await";
 	}
@@ -314,7 +318,7 @@ function formatPeerCard(card: FabricPeerCard): string {
 }
 
 function queuesWhileStopped(command: QueuedCommand | undefined): boolean {
-	return command?.kind === "new" || command?.kind === "model" || command?.kind === "fabric-prewalk" || command?.kind === "fabric-await";
+	return command?.kind === "new" || command?.kind === "model" || command?.kind === "thinking" || command?.kind === "fabric-prewalk" || command?.kind === "fabric-await";
 }
 
 function availableModels(context: ExtensionContext): Model<Api>[] {
@@ -382,7 +386,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let pauseAfterToolsArmed = false;
 	const inFlightTools = new Map<string, string>();
 	let settingsManager: SettingsManager | undefined;
-	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "fabric-prewalk" | "fabric-await" | undefined;
+	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "thinking" | "fabric-prewalk" | "fabric-await" | undefined;
 	let fabricAwaitAbort: AbortController | undefined;
 	let fabricAwaitNote = "";
 	let pendingNewRowId: string | undefined;
@@ -390,11 +394,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let compactionFinishTimer: ReturnType<typeof setTimeout> | undefined;
 	let nativeCompactionInputQueued = false;
 	let nativeCompactionTurnStarted = false;
+	let extensionCompactionInFlight = false;
 	// A compact-and-retry that ended in session_compact_failed is not recovery:
 	// the error hold stays parked for an explicit Enter instead of releasing at
 	// the compaction settle.
 	let compactionRecoveryFailed = false;
-	let extensionCompactionInFlight = false;
 	// Only an overflow compaction recovers a run that died with context
 	// overflow; a threshold compaction after an error is context housekeeping
 	// and must not release the error hold.
@@ -662,7 +666,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const pauseControlCommand = (
 		ctx: ExtensionContext,
 		item: QueuedMessage<ImageContent>,
-		activity: "new" | "model" | "fabric-prewalk" | "fabric-await",
+		activity: "new" | "model" | "thinking" | "fabric-prewalk" | "fabric-await",
 		error: unknown,
 	): void => {
 		if (blockingActivity !== activity || !queue.get(item.id)) return;
@@ -687,7 +691,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const finishControlCommand = (
 		ctx: ExtensionContext,
 		item: QueuedMessage<ImageContent>,
-		activity: "model" | "fabric-prewalk" | "fabric-await",
+		activity: "model" | "thinking" | "fabric-prewalk" | "fabric-await",
 	): void => {
 		if (blockingActivity !== activity || !queue.get(item.id)) return;
 		if (activity === "fabric-await") {
@@ -728,6 +732,38 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				finishControlCommand(ctx, item, "model");
 			} catch (error) {
 				pauseControlCommand(ctx, item, "model", error);
+			}
+		})();
+		return true;
+	};
+
+	const executeThinkingRow = (ctx: ExtensionContext, item: QueuedMessage<ImageContent>, command: Extract<QueuedCommand, { kind: "thinking" }>): boolean => {
+		blockingActivity = "thinking";
+		renderQueue(ctx);
+		void (async () => {
+			try {
+				const requested = command.level?.trim().toLowerCase();
+				let level = requested
+					? THINKING_LEVELS.find((candidate) => candidate === requested)
+					: undefined;
+				if (requested && !level) {
+					throw new Error(`Unknown thinking level "${command.level}". Available levels: ${THINKING_LEVELS.join(", ")}`);
+				}
+				if (!level) {
+					if (!ctx.hasUI) throw new Error("Thinking level selection requires an interactive Pi session");
+					const selected = await ctx.ui.select("Queued /thinking", [...THINKING_LEVELS]);
+					if (!selected) throw new Error("thinking level selection cancelled");
+					level = selected as (typeof THINKING_LEVELS)[number];
+				}
+				pi.setThinkingLevel(level);
+				const effective = pi.getThinkingLevel();
+				ctx.ui.notify(
+					effective === level ? `Thinking level: ${level}` : `Thinking level: ${effective} (clamped from ${level})`,
+					"info",
+				);
+				finishControlCommand(ctx, item, "thinking");
+			} catch (error) {
+				pauseControlCommand(ctx, item, "thinking", error);
 			}
 		})();
 		return true;
@@ -801,6 +837,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		const command = itemCommand(next);
 		if (!command) return false;
 		if (command.kind === "model") return executeModelRow(ctx, next, command);
+		if (command.kind === "thinking") return executeThinkingRow(ctx, next, command);
 		if (command.kind === "fabric-prewalk") return executeFabricPrewalkRow(ctx, next);
 		if (command.kind === "fabric-await") return executeFabricAwaitRow(ctx, next, command);
 		if (command.kind === "new") {
@@ -930,12 +967,18 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.compact({
 				customInstructions: instructions,
 				onComplete: () => {
+					extensionCompactionInFlight = false;
 					if (!nativeCompactionInputQueued) deferCompactionFinish(ctx, "compact");
 				},
 				onError: () => {
+					extensionCompactionInFlight = false;
 					if (!nativeCompactionInputQueued) deferCompactionFinish(ctx, "compact");
 				},
 			});
+			// Pi settles the run this compaction aborted before the compaction
+			// itself runs; that settle must not conclude the activity, so only
+			// the completion callbacks above may finish it from here on.
+			extensionCompactionInFlight = true;
 			return true;
 		} catch (error) {
 			blockingActivity = undefined;
@@ -967,18 +1010,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 		return sendHeadMessage(ctx, "followUp", ctx.isIdle() ? undefined : "steer");
 	};
-					extensionCompactionInFlight = false;
 
 	/**
 	 * Explicit flush: compose every queued message row into one message in
-					extensionCompactionInFlight = false;
 	 * timeline order and send it at once — as native steering during a run, or
 	 * as the prompt that starts the run from idle. Command rows are not
 	 * messages: they stay queued and run at their lane's dispatch boundary.
-			// Pi settles the run this compaction aborted before the compaction
-			// itself runs; that settle must not conclude the activity, so only
-			// the completion callbacks above may finish it from here on.
-			extensionCompactionInFlight = true;
 	 */
 	const drainAll = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
@@ -1354,7 +1391,28 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			if (command?.kind === "compact" && !editSession) {
 				editor.addToHistory?.(text);
 				editor.setText("");
+				// Mid-run, park /compact as a steer row instead of cutting a live
+				// tool call: turn_end fires only after the turn's tool results
+				// land, so the row starts compaction at the next boundary. From
+				// idle there is nothing to wait for and it still starts instantly.
+				if (!ctx.isIdle()) {
+					queue.enqueue("steer", text, []);
+					resumeQueue();
+					renderQueue(ctx);
+					return;
+				}
 				startCompaction(ctx, command.instructions);
+				return;
+			}
+			if (command?.kind === "new" && !editSession && !ctx.isIdle()) {
+				// Same mid-run rule as /compact: replacing the session would cut
+				// live tool work, so park it as a steer row and hand off at the
+				// next turn boundary instead. Idle /new keeps Pi's instant path.
+				editor.addToHistory?.(text);
+				editor.setText("");
+				queue.enqueue("steer", text, []);
+				resumeQueue();
+				renderQueue(ctx);
 				return;
 			}
 			if (command?.kind === "reload" && !editSession && (blockingActivity === "reload" || !ctx.isIdle())) {
@@ -1391,28 +1449,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			const rowId = pendingNewRowId;
 			const row = rowId ? queue.get(rowId) : undefined;
 			if (blockingActivity !== "new" || !row) {
-				// Mid-run, park /compact as a steer row instead of cutting a live
-				// tool call: turn_end fires only after the turn's tool results
-				// land, so the row starts compaction at the next boundary. From
-				// idle there is nothing to wait for and it still starts instantly.
-				if (!ctx.isIdle()) {
-					queue.enqueue("steer", text, []);
-					resumeQueue();
-					renderQueue(ctx);
-					return;
-				}
 				commandContext.ui.notify("No queued /new handoff is pending", "warning");
-				return;
-			}
-			if (command?.kind === "new" && !editSession && !ctx.isIdle()) {
-				// Same mid-run rule as /compact: replacing the session would cut
-				// live tool work, so park it as a steer row and hand off at the
-				// next turn boundary instead. Idle /new keeps Pi's instant path.
-				editor.addToHistory?.(text);
-				editor.setText("");
-				queue.enqueue("steer", text, []);
-				resumeQueue();
-				renderQueue(ctx);
 				return;
 			}
 			plannedNewSession = true;
@@ -1611,8 +1648,13 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		inFlightTools.clear();
 		pauseAfterToolsArmed = false;
 		const lastMessage = event.messages.at(-1);
+		// Pi shapes an abort that lands before the first streamed chunk as an
+		// error tail ("This operation was aborted"), which turn_end's aborted
+		// branch never sees. A control row in flight owns that tail, so it must
+		// not be classified — let alone parked — as a failed run.
 		if (
 			lastMessage?.role === "assistant"
+			&& !blockingActivity
 			&& (
 				lastMessage.stopReason === "error"
 				|| isContextOverflow(lastMessage, ctx.model?.contextWindow ?? 0)
@@ -1648,13 +1690,15 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		// Pi shapes an abort that lands before the first streamed chunk as an
-		// error tail ("This operation was aborted"), which turn_end's aborted
-		// branch never sees. A control row in flight owns that tail, so it must
-		// not be classified — let alone parked — as a failed run.
 		activeContext = ctx;
+		if (blockingActivity === "compact" && extensionCompactionInFlight) {
+			// An extension-started compaction aborts the run and Pi settles that
+			// abort before summarization even starts; the completion callback
+			// owns the finish, or the trailing rows would never dispatch.
+			renderQueue(ctx);
+			return;
+		}
 		if (blockingActivity === "compact" || blockingActivity === "auto-compact") {
-			&& !blockingActivity
 			const activity = blockingActivity;
 			if (nativeCompactionInputQueued && !nativeCompactionTurnStarted) {
 				renderQueue(ctx);
@@ -1691,13 +1735,6 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			const stash: RuntimeStash = { reason: "new", paused, rows: queue.snapshot() };
 			globalThis.__tmustierPiQueueSteerReloadStash = stash;
 		} else {
-		if (blockingActivity === "compact" && extensionCompactionInFlight) {
-			// An extension-started compaction aborts the run and Pi settles that
-			// abort before summarization even starts; the completion callback
-			// owns the finish, or the trailing rows would never dispatch.
-			renderQueue(ctx);
-			return;
-		}
 			globalThis.__tmustierPiQueueSteerReloadStash = undefined;
 			// Ordinary shutdowns leave committed rows in the outgoing session for
 			// a later paused resume. Intentional reload and queued /new handoffs use
@@ -1749,6 +1786,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		nativeCompactionTurnStarted = false;
 		compactionRecoveryFailed = false;
 		compactionIsOverflowRecovery = false;
+		extensionCompactionInFlight = false;
 		tuiSubmit = undefined;
 		queue.clear();
 	});
@@ -1786,7 +1824,6 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	/** Re-adopt committed queue state after an intentional in-process runtime swap. */
 	function restoreRuntimeStash(reason: string, ctx: ExtensionContext): void {
 		const stash = globalThis.__tmustierPiQueueSteerReloadStash;
-		extensionCompactionInFlight = false;
 		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
 		const stashReason = stash?.reason ?? "reload";
 		if (!stash || reason !== stashReason) return;

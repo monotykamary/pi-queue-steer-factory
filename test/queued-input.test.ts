@@ -67,8 +67,11 @@ test("does not let resources or short skill aliases shadow Pi built-ins", () => 
 	const commands = [
 		command("model", "prompt", "/missing/model.md"),
 		command("skill:model", "skill", "/missing/SKILL.md"),
+		command("thinking", "prompt", "/missing/thinking.md"),
+		command("skill:thinking", "skill", "/missing/SKILL.md"),
 	];
 	assert.equal(expandQueuedInput("/model", commands), "/model");
+	assert.equal(expandQueuedInput("/thinking medium", commands), "/thinking medium");
 });
 
 test("leaves messages and unknown slash input unchanged", () => {
@@ -97,6 +100,8 @@ test("classifies only native post-compaction TUI submissions", () => {
 	assert.equal(queuesDuringCompaction("/deploy prod", [extension, prompt]), false);
 	assert.equal(queuesDuringCompaction("/model small", [extension, prompt]), false);
 	assert.equal(queuesDuringCompaction("  /model small  ", [extension, prompt]), false);
+	assert.equal(queuesDuringCompaction("/thinking medium", [extension, prompt]), false);
+	assert.equal(queuesDuringCompaction("  /thinking medium  ", [extension, prompt]), false);
 	assert.equal(queuesDuringCompaction("/debug", [extension, prompt]), false);
 	assert.equal(queuesDuringCompaction("!echo now", [extension, prompt]), false);
 	assert.equal(queuesDuringCompaction("  !echo now  ", [extension, prompt]), false);
@@ -105,6 +110,7 @@ test("classifies only native post-compaction TUI submissions", () => {
 
 	assert.equal(queuesDuringCompaction("ordinary follow-up", [extension, prompt], "followUp"), true);
 	assert.equal(queuesDuringCompaction("/model small", [extension, prompt], "followUp"), true);
+	assert.equal(queuesDuringCompaction("/thinking medium", [extension, prompt], "followUp"), true);
 	assert.equal(queuesDuringCompaction("!echo now", [extension, prompt], "followUp"), true);
 	assert.equal(queuesDuringCompaction("/deploy prod", [extension, prompt], "followUp"), false);
 	assert.equal(queuesDuringCompaction("   ", [extension, prompt], "followUp"), false);
@@ -122,6 +128,7 @@ test("classifies slash invocations that can park as queue rows", () => {
 	assert.equal(isExpandableSlashCommand("  /review now  ", commands), true);
 	assert.equal(isExpandableSlashCommand("/deploy prod", commands), false);
 	assert.equal(isExpandableSlashCommand("/model small", commands), false);
+	assert.equal(isExpandableSlashCommand("/thinking medium", commands), false);
 	assert.equal(isExpandableSlashCommand("/compact keep notes", commands), false);
 	assert.equal(isExpandableSlashCommand("/reload", commands), false);
 	assert.equal(isExpandableSlashCommand("/missing", commands), false);

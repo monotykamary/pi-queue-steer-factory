@@ -6,6 +6,7 @@ export type QueuedCommand =
 	| { kind: "reload" }
 	| { kind: "new" }
 	| { kind: "model"; target?: string }
+	| { kind: "thinking"; level?: string }
 	| { kind: "fabric-prewalk" }
 	| { kind: "fabric-await"; peer?: string };
 
@@ -21,6 +22,11 @@ export function parseQueuedCommand(text: string): QueuedCommand | undefined {
 	if (trimmed.startsWith("/model ")) {
 		const target = trimmed.slice("/model ".length).trim();
 		return { kind: "model", target: target || undefined };
+	}
+	if (trimmed === "/thinking") return { kind: "thinking" };
+	if (trimmed.startsWith("/thinking ")) {
+		const level = trimmed.slice("/thinking ".length).trim();
+		return { kind: "thinking", level: level || undefined };
 	}
 	if (/^\/fabric\s+prewalk$/.test(trimmed)) return { kind: "fabric-prewalk" };
 	const fabricAwait = /^\/fabric\s+await(?:\s+(\S+))?$/.exec(trimmed);

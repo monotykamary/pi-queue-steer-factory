@@ -26,6 +26,16 @@ test("parses Factory control rows exactly", () => {
 	assert.equal(parseQueuedCommand("/fabric status"), undefined);
 });
 
+test("parses /thinking with and without a level", () => {
+	assert.deepEqual(parseQueuedCommand("/thinking"), { kind: "thinking" });
+	assert.deepEqual(parseQueuedCommand("  /thinking  "), { kind: "thinking" });
+	assert.deepEqual(parseQueuedCommand("/thinking medium"), { kind: "thinking", level: "medium" });
+	assert.deepEqual(parseQueuedCommand("/thinking   high  "), { kind: "thinking", level: "high" });
+	assert.deepEqual(parseQueuedCommand("/thinking   "), { kind: "thinking" });
+	assert.equal(parseQueuedCommand("/thinkinged"), undefined);
+	assert.equal(parseQueuedCommand("/thinking-medium"), undefined);
+});
+
 test("parses /reload exactly", () => {
 	assert.deepEqual(parseQueuedCommand("/reload"), { kind: "reload" });
 	assert.deepEqual(parseQueuedCommand(" /reload "), { kind: "reload" });

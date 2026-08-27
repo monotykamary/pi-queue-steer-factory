@@ -122,6 +122,7 @@ async function createIntegrationHarness(options: {
 	maxTokens?: number;
 	extraExtensions?: ExtensionFactory[];
 	retryEnabled?: boolean;
+	reasoning?: boolean;
 	tools?: string[];
 } = {}): Promise<IntegrationHarness> {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-integration-"));
@@ -130,6 +131,7 @@ async function createIntegrationHarness(options: {
 	const faux = fauxProvider({
 		models: [{
 			id: "queue-integration",
+			reasoning: options.reasoning ?? false,
 			contextWindow: options.contextWindow ?? 100_000,
 			maxTokens: options.maxTokens ?? 1_000,
 		}],
@@ -295,8 +297,6 @@ test("real failed manual compaction releases the following row without adding a 
 	}
 });
 
-test("real retry finishes before the extension releases its queued follow-up", async () => {
-	const harness = await createIntegrationHarness({ retryEnabled: true });
 test("real steered /compact waits for the in-flight tool and fires at the turn boundary", async () => {
 	let releaseToolGate: (() => void) | undefined;
 	const toolGate = new Promise<void>((resolve) => {
@@ -388,6 +388,8 @@ test("real steered /compact waits for the in-flight tool and fires at the turn b
 	}
 });
 
+test("real retry finishes before the extension releases its queued follow-up", async () => {
+	const harness = await createIntegrationHarness({ retryEnabled: true });
 	try {
 		const trace: string[] = [];
 		harness.session.subscribe((event) => trace.push(event.type));
@@ -552,6 +554,35 @@ test("publishes queue state on pi.events and globalThis for interop consumers", 
 	} finally {
 		await harness.cleanup();
 		globalThis.__tmustierPiQueueSteerState = undefined;
+	}
+});
+
+test("real queued /thinking sets the level instead of becoming a message", async () => {
+	const harness = await createIntegrationHarness({ reasoning: true });
+	try {
+		await seedSession(harness);
+		harness.session.setThinkingLevel("off");
+		const active = gatedResponse("active response");
+		harness.faux.setResponses([
+			active.step,
+			fauxAssistantMessage("response after thinking"),
+		]);
+		const activeStarted = nextAgentStart(harness.session);
+		const activePrompt = harness.session.prompt("active prompt");
+		await within(activeStarted, () => "agent did not start");
+		await harness.session.prompt("/thinking high", { streamingBehavior: "followUp" });
+		await harness.session.prompt("after thinking row", { streamingBehavior: "followUp" });
+		const resumed = nextAgentRun(harness.session);
+		active.release();
+		await activePrompt;
+
+		await within(resumed, () => "follow-up row did not run");
+		assert.equal(harness.session.thinkingLevel, "high");
+		assert.equal(userTexts(harness.session).some((text) => text.startsWith("/thinking")), false);
+		assert.equal(userTexts(harness.session).at(-1), "after thinking row");
+		assert.equal(harness.session.getLastAssistantText(), "response after thinking");
+	} finally {
+		await harness.cleanup();
 	}
 });
 

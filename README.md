@@ -58,7 +58,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Queue paused after an abort | `Enter` | Resume from the next steering row, or the next follow-up |
 | Queue paused after a run error | `Enter` | Resume manually; a recovered run (built-in retry, auto-compact, pi-retry) releases the queue first |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
-| Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, or `/fabric prewalk` visibly and paused |
+| Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, `/thinking`, or `/fabric prewalk` visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
 | Agent working | `/pause` | Pause the run once every in-flight tool call finishes; tool work is never killed mid-execution |
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
@@ -94,7 +94,7 @@ A run that ends in an error (including context overflow) pauses the queue instea
 
 ## Queueing while stopped
 
-With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
+With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
 
 A plain `Enter` still runs every command immediately. With `Option+Enter`, other Pi built-ins, other extension commands, unknown slash input and `!` bash keep passing straight through.
 
@@ -106,11 +106,12 @@ Arbitrary commands are intentionally not replayed. The supported command rows ha
 
 ## Command rows
 
-Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, exact `/fabric prewalk`, or `/fabric await [label]` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
+Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, or `/fabric await [label]` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
 
-- `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, and `/fabric prewalk` paused
+- `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, `/thinking`, and `/fabric prewalk` paused
 - lane timing is uniform: a steered command row executes at the next turn boundary — mid-run, exactly as if typed there — and a queued (follow-up) command row runs when the run settles; rows behind an executing command wait for it
 - `/model provider/model` resolves an exact available model; bare or non-exact `/model` opens a filtered picker, and cancellation or authentication failure restores and pauses the row
+- `/thinking level` sets Pi's thinking level through the clamped public API; bare `/thinking` opens the level picker, and an unknown level or a cancelled picker restores and pauses the row
 - exact `/fabric prewalk` waits for Pi Fabric to acknowledge that prewalk is armed before the next row can run; it requires Pi Fabric 0.62.7 or newer
 - `/fabric await [label]` holds the tail until every watched peer session on the project mesh settles (a quiet window after its last observed run) or leaves the mesh; it requires Pi Fabric 0.64.0 or newer. Controls and watch state show on the row (`waiting for PQS-1 (running)`)
 - `/new` starts a fresh session and transfers its committed tail to that replacement runtime without adding rows to either transcript; the tail continues automatically, while reopening a persisted queue still starts paused
@@ -145,7 +146,7 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 - during a run, the combined message reaches Pi as one steering message
 - while stopped, the combined message starts a new run directly
 - a mid-turn drain lands inside the in-flight call's context when the turn has not responded yet, or as the next steering turn once it has — either way the transcript records the combined message exactly once
-- command rows are not messages: `/compact`, `/reload`, `/new`, `/model`, and `/fabric prewalk` stay queued and execute at their lane's dispatch boundary
+- command rows are not messages: `/compact`, `/reload`, `/new`, `/model`, `/thinking`, and `/fabric prewalk` stay queued and execute at their lane's dispatch boundary
 - an active row-editing session refuses the drain, so rows are never pulled away mid-draft
 - a synchronous hand-off failure restores every row, in order, and pauses the queue
 
@@ -199,7 +200,7 @@ The extension composes with custom editors including raw-paste and pi-session-hu
 
 The queue publishes its state for peer extensions on the shared `pi.events` bus:
 
-- **Event** — `queue-steer:state`, emitted on every change to `{ pending, paused, blocked }`. `pending` counts all rows still held by the queue (both lanes, including paused and edit-held rows), `paused` means dispatch is paused, `blocked` means a control row (`/compact`, `/model`, `/new`, `/reload`, `/fabric prewalk`) is executing.
+- **Event** — `queue-steer:state`, emitted on every change to `{ pending, paused, blocked }`. `pending` counts all rows still held by the queue (both lanes, including paused and edit-held rows), `paused` means dispatch is paused, `blocked` means a control row (`/compact`, `/model`, `/thinking`, `/new`, `/reload`, `/fabric prewalk`) is executing.
 - **Mirror** — the same snapshot lives on `globalThis.__tmustierPiQueueSteerState` for synchronous reads, immune to extension load order, and survives `/reload` runtime swaps.
 
 Consumers: [pi-ledger](https://github.com/inloopstudio-team/pi-ledger) ≥ 0.6.0 holds back its no-credit engagement wizard while `pending > 0`, so a parked backlog no longer triggers the billing prompt, and re-offers it once the backlog drains without starting a run.
