@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0 - 2026-08-27
+
+### Changed
+
+- Stopped `Option+Enter` now parks `/compact [instructions]` and `/reload` as paused command rows instead of running them immediately: every recognised control command follows the same rule as queued messages, skills and templates, and nothing fires until an explicit empty-composer `Enter`. The idle input-event bypass parks the same way, plain `Enter` from an idle composer still starts `/compact` and `/new` instantly, and other built-ins, extension commands, unknown slash input and `!` bash keep passing straight through.
+
 ## 0.10.0 - 2026-08-27
 
 ### Added
