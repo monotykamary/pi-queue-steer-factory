@@ -30,7 +30,7 @@ Latest result with Pi 0.84.3: 149 tests passed.
 
 ## Factory control pipeline
 
-Pi 0.84.3 verification covers 149 automated tests. The control-row matrix includes exact `/new`, `/model [target]`, and `/fabric prewalk` parsing; stopped `Option+Enter` capture of every control row, `/compact` and `/reload` included, and their explicit empty-composer `Enter` release; model selection success and cancellation; missing-Fabric restoration; request/ack ordering; cancelled session creation; and the complete `/new` → `/model` → `/fabric prewalk` → task handoff.
+Pi 0.84.3 verification covers 152 automated tests. The control-row matrix includes exact `/new`, `/model [target]`, and `/fabric prewalk` parsing; stopped `Option+Enter` capture of every control row, `/compact` and `/reload` included, and their explicit empty-composer `Enter` release; model selection success and cancellation; missing-Fabric restoration; request/ack ordering; cancelled session creation; the complete `/new` → `/model` → `/fabric prewalk` → task handoff; and queued `/new` model pinning — the outgoing model is re-applied in the replacement session (silently when it already matches, with a warning and continued dispatch when it is no longer available).
 
 A queued `/new` removes itself from the transferred tail, writes an empty invisible snapshot in the old session to retire any older persisted queue, and restores the tail automatically only in the new in-process runtime. Ordinary startup/resume restoration remains paused and requires an explicit empty-composer `Enter`.
 

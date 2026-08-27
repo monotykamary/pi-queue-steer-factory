@@ -51,6 +51,11 @@ interface RuntimeStash {
 	reason?: "reload" | "new";
 	paused: boolean;
 	rows: QueuedMessage<ImageContent>[];
+	/** Outgoing session model, stashed by a queued /new: Pi resolves a fresh
+	 *  session's model from the shared saved default (the last model any
+	 *  session persisted) or the first scoped model, not from the session the
+	 *  tail was queued under, so the handoff re-applies it. */
+	model?: { provider: string; id: string };
 }
 declare global {
 	// Keep the legacy key so an update from pi-queue-steer 0.3.x cannot lose rows.
@@ -1530,11 +1535,11 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		},
 	});
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		activeContext = ctx;
 		settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 		ctx.ui.setWidget(WIDGET_ID, undefined);
-		restoreRuntimeStash(event.reason, ctx);
+		await restoreRuntimeStash(event.reason, ctx);
 		restoreSessionQueue(event.reason, ctx);
 		installEditor(ctx);
 		scheduleEditorInstall(ctx);
@@ -1738,7 +1743,10 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 					"error",
 				);
 			}
-			const stash: RuntimeStash = { reason: "new", paused, rows: queue.snapshot() };
+			const outgoingModel = ctx.model
+				? { provider: ctx.model.provider, id: ctx.model.id }
+				: undefined;
+			const stash: RuntimeStash = { reason: "new", paused, rows: queue.snapshot(), model: outgoingModel };
 			globalThis.__tmustierPiQueueSteerReloadStash = stash;
 		} else {
 			globalThis.__tmustierPiQueueSteerReloadStash = undefined;
@@ -1827,12 +1835,46 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		);
 	}
 
+	/**
+	 * Pin the outgoing session's model back onto the replacement runtime. Pi
+	 * resolves a fresh session's model from the shared saved default — the last
+	 * model any session persisted, so a concurrent session can repoint it — or
+	 * from the first scoped model, which can differ from the model this queue
+	 * was running under. Applied before the transferred tail auto-dispatches.
+	 */
+	async function restoreHandoffModel(
+		target: { provider: string; id: string },
+		ctx: ExtensionContext,
+		stashReason: string,
+	): Promise<void> {
+		const current = ctx.model;
+		if (current && current.provider === target.provider && current.id === target.id) return;
+		try {
+			const restored = ctx.modelRegistry.find(target.provider, target.id);
+			if (restored && (await pi.setModel(restored))) {
+				ctx.ui.notify(`Restored model ${target.provider}/${target.id} after ${stashReason}`, "info");
+				return;
+			}
+		} catch (error) {
+			ctx.ui.notify(
+				`Could not restore model ${target.provider}/${target.id} after ${stashReason}: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+			return;
+		}
+		ctx.ui.notify(
+			`Could not restore model ${target.provider}/${target.id} after ${stashReason}; continuing with ${current ? `${current.provider}/${current.id}` : "Pi's default model"}`,
+			"warning",
+		);
+	}
+
 	/** Re-adopt committed queue state after an intentional in-process runtime swap. */
-	function restoreRuntimeStash(reason: string, ctx: ExtensionContext): void {
+	async function restoreRuntimeStash(reason: string, ctx: ExtensionContext): Promise<void> {
 		const stash = globalThis.__tmustierPiQueueSteerReloadStash;
 		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
 		const stashReason = stash?.reason ?? "reload";
 		if (!stash || reason !== stashReason) return;
+		if (stash.model) await restoreHandoffModel(stash.model, ctx, stashReason);
 		if (stash.rows.length > 0) {
 			queue.restore(stash.rows);
 			paused = stash.paused;

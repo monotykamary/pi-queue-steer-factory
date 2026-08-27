@@ -253,6 +253,7 @@ function createHarness(options: {
 	compactStartError?: Error;
 	autocompleteVisible?: boolean;
 	sessionEntries?: unknown[];
+	model?: { provider: string; id: string; name?: string };
 	models?: Array<{ provider: string; id: string; name?: string }>;
 	selectResult?: string;
 	setModelResult?: boolean | Error;
@@ -324,7 +325,12 @@ function createHarness(options: {
 		cwd: options.cwd ?? DEFAULT_TEST_CWD,
 		ui,
 		scopedModels: [],
-		modelRegistry: { getAvailable: () => options.models ?? [] },
+		model: options.model,
+		modelRegistry: {
+			getAvailable: () => options.models ?? [],
+			find: (provider: string, id: string) =>
+				(options.models ?? []).find((model) => model.provider === provider && model.id === id),
+		},
 		isIdle: () => idle,
 		isProjectTrusted: () => options.projectTrusted ?? true,
 		hasPendingMessages: () => pending,
@@ -1203,6 +1209,102 @@ test("carries a queued new-session tail through model, prewalk, and task dispatc
 		assert.deepEqual(second.selectedModels, [{ provider: "openai", id: "gpt-5.4" }]);
 		assert.equal(second.sent[0]?.content, "factory task");
 		assert.match(second.notifications[0]?.message ?? "", /Restored 3 queued rows after new/);
+		await second.emit("session_shutdown", { reason: "quit" });
+	} finally {
+		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
+	}
+});
+
+test("pins the outgoing model onto a queued /new replacement session", async () => {
+	const outgoingModel = { provider: "faux", id: "queue-model" };
+	const first = createHarness({ model: outgoingModel, newSession: async () => ({ cancelled: false }) });
+	try {
+		await first.emit("session_start", { reason: "startup" });
+		first.setIdle(true);
+		await enqueue(first, "followUp", "/new");
+		await enqueue(first, "followUp", "carry the model over");
+
+		await first.emit("agent_settled");
+		await waitFor(() => first.newSessionCalls === 1);
+		await first.emit("session_shutdown", { reason: "new" });
+
+		// The replacement session resolves Pi's saved default, which another
+		// session persisted and which differs from the model the tail ran under.
+		const second = createHarness({
+			model: { provider: "anthropic", id: "claude-opus-4-8" },
+			models: [{ provider: "faux", id: "queue-model" }, { provider: "anthropic", id: "claude-opus-4-8" }],
+		});
+		second.setIdle(true);
+		await second.emit("session_start", { reason: "new" });
+		await waitFor(() => second.sent.length === 1);
+
+		assert.deepEqual(second.selectedModels, [outgoingModel]);
+		assert.equal(second.sent[0]?.content, "carry the model over");
+		assert.match(second.notifications[0]?.message ?? "", /Restored model faux\/queue-model after new/);
+		await second.emit("session_shutdown", { reason: "quit" });
+	} finally {
+		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
+	}
+});
+
+test("keeps a queued /new model restore silent when the model already matches", async () => {
+	const outgoingModel = { provider: "faux", id: "queue-model" };
+	const first = createHarness({ model: outgoingModel, newSession: async () => ({ cancelled: false }) });
+	try {
+		await first.emit("session_start", { reason: "startup" });
+		first.setIdle(true);
+		await enqueue(first, "followUp", "/new");
+		await enqueue(first, "followUp", "unchanged model");
+
+		await first.emit("agent_settled");
+		await waitFor(() => first.newSessionCalls === 1);
+		await first.emit("session_shutdown", { reason: "new" });
+
+		const second = createHarness({
+			model: outgoingModel,
+			models: [outgoingModel],
+		});
+		second.setIdle(true);
+		await second.emit("session_start", { reason: "new" });
+		await waitFor(() => second.sent.length === 1);
+
+		assert.deepEqual(second.selectedModels, []);
+		assert.equal(second.sent[0]?.content, "unchanged model");
+		await second.emit("session_shutdown", { reason: "quit" });
+	} finally {
+		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
+	}
+});
+
+test("warns but still dispatches a queued /new tail when the outgoing model is unavailable", async () => {
+	const first = createHarness({
+		model: { provider: "faux", id: "queue-model" },
+		newSession: async () => ({ cancelled: false }),
+	});
+	try {
+		await first.emit("session_start", { reason: "startup" });
+		first.setIdle(true);
+		await enqueue(first, "followUp", "/new");
+		await enqueue(first, "followUp", "still dispatches");
+
+		await first.emit("agent_settled");
+		await waitFor(() => first.newSessionCalls === 1);
+		await first.emit("session_shutdown", { reason: "new" });
+
+		const second = createHarness({
+			model: { provider: "anthropic", id: "claude-opus-4-8" },
+			models: [{ provider: "anthropic", id: "claude-opus-4-8" }],
+		});
+		second.setIdle(true);
+		await second.emit("session_start", { reason: "new" });
+		await waitFor(() => second.sent.length === 1);
+
+		assert.deepEqual(second.selectedModels, []);
+		assert.equal(second.sent[0]?.content, "still dispatches");
+		assert.match(
+			second.notifications[0]?.message ?? "",
+			/Could not restore model faux\/queue-model after new; continuing with anthropic\/claude-opus-4-8/,
+		);
 		await second.emit("session_shutdown", { reason: "quit" });
 	} finally {
 		globalThis.__tmustierPiQueueSteerReloadStash = undefined;
