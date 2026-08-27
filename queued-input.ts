@@ -64,8 +64,9 @@ function substituteArgs(content: string, args: readonly string[]): string {
 /**
  * Whether a stopped Option+Enter on this slash invocation can park as a queue
  * row and expand at delivery: known skill or prompt-template names can;
- * built-ins, extension commands and unknown slash input keep running
- * immediately. `/compact` and `/reload` stay command rows, not messages.
+ * extension commands and unknown slash input keep running immediately.
+ * Recognised built-in controls park too, but as command rows that never
+ * expand (see queuesWhileStopped), so they are excluded here.
  */
 export function isExpandableSlashCommand(text: string, commands: readonly SlashCommandInfo[]): boolean {
 	const name = /^\/([^\s]+)/.exec(text.trim())?.[1];

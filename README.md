@@ -58,7 +58,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Queue paused after an abort | `Enter` | Resume from the next steering row, or the next follow-up |
 | Queue paused after a run error | `Enter` | Resume manually; a recovered run (built-in retry, auto-compact, pi-retry) releases the queue first |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
-| Agent stopped | `Option+Enter` | Queue a message, skill/template, `/new`, `/model`, `/thinking`, or `/fabric prewalk` visibly and paused |
+| Agent stopped | `Option+Enter` | Queue a message, skill/template, or control command (`/compact`, `/reload`, `/new`, `/model`, `/thinking`, `/fabric prewalk`) visibly and paused |
 | Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
 | Agent working | `/pause` | Pause the run once every in-flight tool call finishes; tool work is never killed mid-execution |
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
@@ -94,7 +94,7 @@ A run that ends in an error (including context overflow) pauses the queue instea
 
 ## Queueing while stopped
 
-With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
+With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
 
 A plain `Enter` still runs every command immediately. With `Option+Enter`, other Pi built-ins, other extension commands, unknown slash input and `!` bash keep passing straight through.
 
@@ -108,7 +108,7 @@ Arbitrary commands are intentionally not replayed. The supported command rows ha
 
 Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, or `/fabric await [label]` are command rows. A row with image attachments remains a normal message even if its text matches a command, so attachments are never discarded. Command rows execute the control operation instead of becoming LLM messages:
 
-- `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks `/new`, `/model`, `/thinking`, and `/fabric prewalk` paused
+- `Option+Enter` while the agent works queues a command in normal follow-up order; while stopped it parks every command row paused, `/compact` and `/reload` included
 - lane timing is uniform: a steered command row executes at the next turn boundary — mid-run, exactly as if typed there — and a queued (follow-up) command row runs when the run settles; rows behind an executing command wait for it
 - `/model provider/model` resolves an exact available model; bare or non-exact `/model` opens a filtered picker, and cancellation or authentication failure restores and pauses the row
 - `/thinking level` sets Pi's thinking level through the clamped public API; bare `/thinking` opens the level picker, and an unknown level or a cancelled picker restores and pauses the row
@@ -120,7 +120,7 @@ Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [t
 - `/reload` queued as a follow-up runs at settle, sidestepping Pi's built-in busy wait warning; steered, it fires at the next turn boundary and Pi's own busy handling applies
 - plain `Enter` on `/compact` or `/new` while the agent works parks it as a steer row instead of firing instantly: it runs at the next turn boundary — after the turn's in-flight tool results land — and the extension owns the abort tail; from idle, both still start immediately and a started compaction holds visible rows until it settles
 - ordinary messages submitted during compaction remain in Pi's native queue and can run before extension-owned command rows after compaction finishes
-- stopped `Option+Enter` still executes `/compact` and `/reload` immediately; only the new Factory controls park paused
+- stopped `Option+Enter` parks `/compact` and `/reload` paused like every other control row; they run only on an explicit empty-composer `Enter`
 - unsupported command forms, including `/fabric prewalk <task>`, are not control rows; queue exact `/fabric prewalk` and the task as separate rows
 - command rows show a `⚙` marker and keep the same pause, edit, reorder and snapshot semantics as messages
 

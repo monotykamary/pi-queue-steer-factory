@@ -317,8 +317,14 @@ function formatPeerCard(card: FabricPeerCard): string {
 	return `${card.status === "running" ? "●" : "○"} ${bits.join(" · ")}`;
 }
 
+/**
+ * Every recognised control command parks as a paused row on a stopped
+ * Option+Enter, /compact and /reload included — the same rule messages,
+ * skills and templates follow. Only other built-ins, extension commands,
+ * unknown slash input and bash still run immediately.
+ */
 function queuesWhileStopped(command: QueuedCommand | undefined): boolean {
-	return command?.kind === "new" || command?.kind === "model" || command?.kind === "thinking" || command?.kind === "fabric-prewalk" || command?.kind === "fabric-await";
+	return command !== undefined;
 }
 
 function availableModels(context: ExtensionContext): Model<Api>[] {
@@ -1248,7 +1254,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 					) {
 						// While the agent is stopped, Option+Enter parks the submission in
 						// the follow-up lane, paused; plain Enter keeps Pi's immediate
-						// send. Skills, templates and the whitelisted Factory controls park
+						// send. Skills, templates and every recognised control command park
 						// the same way; other built-ins, extension commands, unknown slash
 						// input and bash still act immediately. Pending paste images
 						// are not readable here, matching upstream's native-capture fidelity.

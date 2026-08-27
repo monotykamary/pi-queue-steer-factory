@@ -1851,22 +1851,73 @@ test("queues Option+Enter submissions while stopped and sends on empty Enter", a
 	]);
 });
 
-test("parks Factory control commands on stopped Option+Enter", async () => {
+test("parks control commands on stopped Option+Enter", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	harness.setIdle(true);
 
-	for (const text of ["/new", "/model openai/gpt-5.4", "/fabric prewalk"]) {
+	for (const text of ["/compact keep the notes", "/reload", "/new", "/model openai/gpt-5.4", "/thinking high", "/fabric prewalk"]) {
 		harness.editor.setText(text);
 		harness.editor.handleInput("alt-enter");
 	}
 
 	const rendered = renderWidget(harness);
-	assert.match(rendered, /follow-ups \(3\) · paused/);
+	assert.match(rendered, /follow-ups \(6\) · paused/);
+	assert.match(rendered, /\/compact keep the notes/);
+	assert.match(rendered, /\/reload/);
 	assert.match(rendered, /\/new/);
 	assert.match(rendered, /\/model openai\/gpt-5\.4/);
+	assert.match(rendered, /\/thinking high/);
 	assert.match(rendered, /\/fabric prewalk/);
 	assert.equal(harness.sent.length, 0);
+	assert.equal(harness.compactCalls.length, 0);
+	assert.equal(harness.submitted.length, 0);
+});
+
+test("stopped Option+Enter /compact runs only on an explicit empty Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	harness.editor.setText("/compact keep the API notes");
+	harness.editor.handleInput("alt-enter");
+	assert.equal(harness.editor.getText(), "");
+	assert.equal(harness.compactCalls.length, 0);
+	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+
+	harness.editor.handleInput("enter");
+	assert.equal(harness.compactCalls.length, 1);
+	assert.equal(harness.compactCalls[0]?.customInstructions, "keep the API notes");
+});
+
+test("stopped Option+Enter /reload runs only on an explicit empty Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	harness.editor.setText("/reload");
+	harness.editor.handleInput("alt-enter");
+	assert.equal(harness.submitted.length, 0);
+	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+
+	harness.editor.handleInput("enter");
+	await waitFor(() => harness.submitted.length === 1);
+	assert.deepEqual(harness.submitted, ["/reload"]);
+});
+
+test("an input-event control command while stopped parks paused until empty Enter", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	// Alt+Enter can bypass Pi's built-in command dispatch while idle; the
+	// command row parks paused exactly like the editor-captured path.
+	await harness.emit("input", { source: "interactive", text: "/compact" });
+	assert.equal(harness.compactCalls.length, 0);
+	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+
+	harness.editor.handleInput("enter");
+	assert.equal(harness.compactCalls.length, 1);
 });
 
 test("plain Enter, slash text and bash pass straight through while stopped", async () => {
