@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0 - 2026-08-29
+
+### Added
+
+- Per-row pause: `Option+P` while editing a row pauses or resumes that single row where it sits. A paused row is a dispatch barrier — earlier rows still dispatch on their normal boundaries, and when the paused row reaches the front of its lane delivery stops there instead of letting rows behind it jump ahead, resuming only from another `Option+P` on that row. The hold is part of the row snapshot: it commits on save, rolls back with the editing session on `Escape`, persists across restart and resume with the rest of the row, and a drain skips paused rows and leaves them parked.
+
 ## 0.12.0 - 2026-08-27
 
 ### Added

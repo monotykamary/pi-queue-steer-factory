@@ -114,9 +114,9 @@ test("empty drafts remove text-only rows but preserve image-only rows", () => {
 	const imageOnly = queue.enqueue("followUp", "", ["image.png"]);
 
 	const deleteEdit = new QueueEditSession(textOnly, "");
-	assert.deepEqual(deleteEdit.commit(queue, ""), { updated: 0, removed: 1, moved: 0 });
+	assert.deepEqual(deleteEdit.commit(queue, ""), { updated: 0, removed: 1, moved: 0, held: 0, released: 0 });
 	const imageEdit = new QueueEditSession(imageOnly, "");
-	assert.deepEqual(imageEdit.commit(queue, ""), { updated: 1, removed: 0, moved: 0 });
+	assert.deepEqual(imageEdit.commit(queue, ""), { updated: 1, removed: 0, moved: 0, held: 0, released: 0 });
 	assert.deepEqual(queue.get(imageOnly.id)?.images, ["image.png"]);
 });
 
@@ -129,7 +129,7 @@ test("removal marks delete any row on commit, including image-only rows", () => 
 	assert.equal(edit.toggleRemoved(imageOnly.id), true);
 	assert.equal(edit.toggleRemoved(imageOnly.id), false);
 	assert.equal(edit.toggleRemoved(imageOnly.id), true);
-	assert.deepEqual(edit.commit(queue, ""), { updated: 0, removed: 1, moved: 0 });
+	assert.deepEqual(edit.commit(queue, ""), { updated: 0, removed: 1, moved: 0, held: 0, released: 0 });
 	assert.deepEqual(queue.laneSnapshot("followUp").map((item) => item.text), ["keep me"]);
 });
 
@@ -144,7 +144,7 @@ test("lane toggles re-lane rows to the destination tail on commit only", () => {
 	assert.equal(edit.laneFor(promote.id), "steer");
 	assert.equal(queue.get(promote.id)?.lane, "followUp");
 
-	assert.deepEqual(edit.commit(queue, "promote me"), { updated: 1, removed: 0, moved: 1 });
+	assert.deepEqual(edit.commit(queue, "promote me"), { updated: 1, removed: 0, moved: 1, held: 0, released: 0 });
 	assert.deepEqual(
 		queue.laneSnapshot("steer").map((item) => item.text),
 		["steer one", "steer two", "promote me"],
@@ -161,7 +161,7 @@ test("toggling a lane twice leaves the row untouched at commit", () => {
 	const edit = new QueueEditSession(first, "");
 	edit.toggleLane(first.id);
 	edit.toggleLane(first.id);
-	assert.deepEqual(edit.commit(queue, "first"), { updated: 1, removed: 0, moved: 0 });
+	assert.deepEqual(edit.commit(queue, "first"), { updated: 1, removed: 0, moved: 0, held: 0, released: 0 });
 	assert.deepEqual(queue.laneSnapshot("steer").map((item) => item.text), ["first", "second"]);
 });
 
@@ -2581,5 +2581,147 @@ test("Option+W without Fabric installed keeps the queue untouched", async () => 
 	assert.match(harness.notifications.at(-1)?.message ?? "", /requires pi-fabric 0.64.0 or newer/);
 	assert.match(renderWidget(harness), /only row/);
 	assert.ok(!renderWidget(harness).includes("/fabric await"));
+});
+
+test("row-level pause is a dispatch barrier in the queue", () => {
+	const queue = new DeliveryQueue<string>();
+	const first = queue.enqueue("steer", "first");
+	queue.enqueue("steer", "second");
+	assert.equal(first.paused, false);
+
+	assert.equal(queue.setPaused(first.id, true), true);
+	assert.equal(queue.get(first.id)?.paused, true);
+	assert.equal(queue.setPaused(first.id, true), false);
+
+	// takeLaneBatch semantics: an all-mode batch stops at the paused head.
+	assert.deepEqual(queue.shiftWhile("steer", (item) => !item.paused), []);
+
+	assert.equal(queue.setPaused(first.id, false), true);
+	assert.deepEqual(
+		queue.shiftWhile("steer", (item) => !item.paused).map((item) => item.text),
+		["first", "second"],
+	);
+
+	// Restore keeps a row's pause flag, like its lane and attachments.
+	const restored = new DeliveryQueue<string>();
+	restored.restore([{ id: "steer-9", lane: "steer", text: "kept", images: [], sequence: 9, paused: true }]);
+	assert.equal(restored.get("steer-9")?.paused, true);
+});
+
+test("edit-session pause toggle commits on save and rolls back on escape", () => {
+	const queue = new DeliveryQueue<string>();
+	const row = queue.enqueue("steer", "hold me");
+
+	const edit = new QueueEditSession(row, "");
+	assert.equal(edit.togglePaused(row.id), true);
+	assert.equal(edit.pausedFor(row.id), true);
+	const held = edit.commit(queue, "hold me");
+	assert.equal(held.held, 1);
+	assert.equal(held.released, 0);
+	assert.equal(queue.get(row.id)?.paused, true);
+
+	const resume = new QueueEditSession(queue.get(row.id)!, "");
+	assert.equal(resume.togglePaused(row.id), false);
+	const released = resume.commit(queue, "hold me");
+	assert.equal(released.released, 1);
+	assert.equal(queue.get(row.id)?.paused ?? false, false);
+
+	// An abandoned session never touches the committed queue.
+	const abandoned = new QueueEditSession(queue.get(row.id)!, "");
+	abandoned.togglePaused(row.id);
+	assert.equal(queue.get(row.id)?.paused ?? false, false);
+});
+
+test("Option+P pauses one row and dispatch holds there until resumed", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "row one");
+	await enqueue(harness, "steer", "row two");
+	await enqueue(harness, "followUp", "later row");
+
+	// Enter editing on the most recent row, step to "row two", pause it, save.
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	assert.match(renderWidget(harness), /pauses on save/);
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Paused 1 queued row/);
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent.map((s) => s.content), ["row one"]);
+
+	// Rows behind the paused head never jump ahead, at any boundary.
+	await harness.emit("agent_end");
+	await harness.emit("agent_settled");
+	assert.equal(harness.sent.length, 1);
+	assert.match(renderWidget(harness), /held at paused row/);
+
+	// Resume the paused row: enter editing on the most recent row, then previous.
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Resumed 1 queued row/);
+
+	await harness.emit("agent_end");
+	assert.deepEqual(harness.sent.map((s) => s.content), ["row one", "row two"]);
+});
+
+test("Escape rolls back an unsaved row pause", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "row one");
+	await enqueue(harness, "steer", "row two");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	assert.match(renderWidget(harness), /pauses on save/);
+	harness.editor.handleInput("escape");
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent.map((s) => s.content), ["row one"]);
+	await harness.emit("agent_end");
+	assert.deepEqual(harness.sent.map((s) => s.content), ["row one", "row two"]);
+});
+
+test("Resuming past a paused head reports the hold instead of dispatching", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	harness.setIdle(true);
+
+	// Option+Enter while stopped parks the row; then pause the row itself.
+	harness.editor.setText("held row");
+	harness.editor.handleInput("alt-enter");
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("enter");
+	assert.equal(harness.sent.length, 0);
+
+	// Empty-composer Enter resumes the queue but holds at the paused head.
+	harness.editor.handleInput("enter");
+	assert.equal(harness.sent.length, 0);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /next follow-up row is paused/);
+
+	// Resuming the row itself lets the next Enter dispatch it.
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("enter");
+	assert.deepEqual(harness.sent.map((s) => s.content), ["held row"]);
+});
+
+test("Drain skips paused rows and leaves them parked", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "go now");
+	await enqueue(harness, "steer", "hold me");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("enter");
+
+	await harness.runCommand("queue-drain");
+	assert.deepEqual(harness.sent.map((s) => s.content), ["go now"]);
+	assert.match(renderWidget(harness), /hold me/);
+	assert.match(renderWidget(harness), /paused/);
 });
 

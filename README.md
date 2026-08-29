@@ -51,6 +51,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Editing a row | Type normally | Edit directly inside the selected row |
 | Editing a row | `Option+X` | Mark the selected row for removal; save deletes it, a second press restores it |
 | Editing a row | `Option+T` | Move the selected row to the other lane when saved |
+| Editing a row | `Option+P` | Pause or resume the selected row where it sits; a paused row stops dispatch at its position until resumed |
 | Editing a row | `Option+Shift+Up` / `Option+Shift+Down` | Reorder the selected row within its lane; positions apply immediately and roll back on `Escape` |
 | Editing a row | `Enter` or `Option+Enter` | Save all row edits without changing their lanes |
 | Editing a row | `Escape` | Cancel the session and roll back all unsaved row edits |
@@ -64,11 +65,15 @@ The extension follows your configured Pi action bindings. These are the default 
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
 | Peer gate waiting | `Escape` | Cancel the wait and pause the gate row |
 
-`Option+Down`, `Option+W`, `Option+X`, `Option+T` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
+`Option+Down`, `Option+W`, `Option+X`, `Option+T`, `Option+P` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
 
 ## Pausing at a tool boundary
 
 Interrupting a run mid-tool (`Escape`) kills the executing tool outright. `/pause` is the graceful alternative: with tool calls in flight it holds fire until every one of them finishes and then stops the run at that tool boundary, so long bash jobs and edits always complete and their results stay in the transcript. With no tool call executing it stops the LLM call immediately, and with the agent idle it simply parks the visible queues. A paused queue stays put until an explicit `Enter` on the empty composer, and `/pause` during compaction reports back instead of cutting summarization.
+
+## Pausing a single row
+
+The whole-queue pause stops everything; sometimes the agent should keep working until it reaches one specific row. While editing the queue (`Option+Up`), press `Option+P` to pause or resume the selected row where it sits. A paused row is a dispatch barrier: earlier rows still send on their normal boundaries, and once the paused row reaches the front of its lane delivery stops there — rows behind it never jump ahead — until you select it again and press `Option+P` to resume. The pause belongs to the row like its lane does: it survives a save, persists across restart and resume, and an unsaved toggle rolls back with the rest of the editing session on `Escape`. A drain skips paused rows and leaves them parked.
 
 ## Peer settle gates
 

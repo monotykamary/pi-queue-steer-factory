@@ -28,6 +28,7 @@ function isQueueRow(value: unknown): value is QueuedMessage<ImageContent> {
 		&& Array.isArray(row.images)
 		&& typeof row.sequence === "number"
 		&& Number.isFinite(row.sequence)
+		&& (row.paused === undefined || typeof row.paused === "boolean")
 	);
 }
 

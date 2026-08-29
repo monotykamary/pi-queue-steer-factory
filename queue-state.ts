@@ -58,6 +58,9 @@ export interface QueuedMessage<TImage = unknown> {
 	text: string;
 	images: TImage[];
 	sequence: number;
+	/** Row-level dispatch hold: a paused row stops its lane's delivery at its
+	 *  position until resumed; rows behind it never jump ahead of it. */
+	paused?: boolean;
 }
 
 /**
@@ -80,6 +83,7 @@ export class DeliveryQueue<TImage = unknown> {
 			text,
 			images: [...images],
 			sequence: this.nextSequence++,
+			paused: false,
 		};
 		this.items.push(item);
 		return this.copy(item);
@@ -103,6 +107,14 @@ export class DeliveryQueue<TImage = unknown> {
 		if (!item) return false;
 		item.text = text;
 		if (images) item.images = [...images];
+		return true;
+	}
+
+	/** Set a row's dispatch hold. Returns false when the row is missing or already in that state. */
+	setPaused(id: string, paused: boolean): boolean {
+		const item = this.items.find((candidate) => candidate.id === id);
+		if (!item || (item.paused ?? false) === paused) return false;
+		item.paused = paused;
 		return true;
 	}
 
@@ -262,12 +274,17 @@ interface QueuedMessageDraft<TImage> {
 	images: TImage[];
 	lane: QueueLane;
 	removed: boolean;
+	paused: boolean;
 }
 
 export interface EditCommitResult {
 	updated: number;
 	removed: number;
 	moved: number;
+	/** Rows whose dispatch hold was engaged by this save. */
+	held: number;
+	/** Rows whose dispatch hold was lifted by this save. */
+	released: number;
 }
 
 /** Rollback-safe drafts spanning rows from either delivery lane. */
@@ -284,7 +301,7 @@ export class QueueEditSession<TImage = unknown> {
 	}
 
 	private newDraft(item: QueuedMessage<TImage>): QueuedMessageDraft<TImage> {
-		return { id: item.id, text: item.text, images: [...item.images], lane: item.lane, removed: false };
+		return { id: item.id, text: item.text, images: [...item.images], lane: item.lane, removed: false, paused: item.paused ?? false };
 	}
 
 	get selectedId(): string {
@@ -347,6 +364,20 @@ export class QueueEditSession<TImage = unknown> {
 		return draft.lane;
 	}
 
+	/** Toggle the row's draft dispatch hold. Returns the new paused state. */
+	togglePaused(id: string): boolean | undefined {
+		const draft = this.drafts.get(id);
+		if (!draft) return undefined;
+		draft.paused = !draft.paused;
+		return draft.paused;
+	}
+
+	/** The row's drafted dispatch hold, or undefined when the session never touched it. */
+	pausedFor(id: string): boolean | undefined {
+		const draft = this.drafts.get(id);
+		return draft ? draft.paused : undefined;
+	}
+
 	laneFor(id: string): QueueLane | undefined {
 		return this.drafts.get(id)?.lane;
 	}
@@ -381,12 +412,18 @@ export class QueueEditSession<TImage = unknown> {
 		let updated = 0;
 		let removed = 0;
 		let moved = 0;
+		let held = 0;
+		let released = 0;
 		for (const draft of this.drafts.values()) {
 			if (draft.removed || (!draft.text.trim() && draft.images.length === 0)) {
 				if (queue.remove(draft.id)) removed += 1;
 				continue;
 			}
 			if (queue.update(draft.id, draft.text, draft.images)) updated += 1;
+			if (queue.setPaused(draft.id, draft.paused)) {
+				if (draft.paused) held += 1;
+				else released += 1;
+			}
 		}
 		// Apply lane moves in queue order so multi-row moves land at the
 		// destination tail in the same order the timeline previewed them.
@@ -396,6 +433,6 @@ export class QueueEditSession<TImage = unknown> {
 				if (queue.moveToLaneTail(item.id, draft.lane)) moved += 1;
 			}
 		}
-		return { updated, removed, moved };
+		return { updated, removed, moved, held, released };
 	}
 }

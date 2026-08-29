@@ -68,6 +68,7 @@ const DRAIN_COMMAND = "queue-drain";
 const PAUSE_COMMAND = "pause";
 const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
 const REMOVE_ROW_KEY = "alt+x";
+const PAUSE_ROW_KEY = "alt+p";
 const TOGGLE_LANE_KEY = "alt+t";
 const AWAIT_PEERS_KEY = "alt+w";
 const REORDER_UP_KEY = "alt+shift+up";
@@ -116,6 +117,10 @@ interface TimelineItem extends QueuedMessage<ImageContent> {
 	removed: boolean;
 	movedLane: boolean;
 	held: boolean;
+	/** Effective row-level dispatch hold (draft value when the edit session touched it). */
+	rowPaused: boolean;
+	/** True when the current edit session drafted a pause toggle for this row. */
+	rowPauseDrafted: boolean;
 	command: QueuedCommand | undefined;
 }
 
@@ -176,8 +181,15 @@ class QueueTimelineWidget implements Component {
 		const color = laneColor(lane);
 		const border = (text: string) => this.theme.fg(color, text);
 		const laneHeld = items.some((item) => item.held);
+		const headPaused = items[0]?.rowPaused ?? false;
 		const stage = lane === "steer" ? "next turn" : "after this run";
-		const state = this.paused ? "paused" : laneHeld ? "held while editing" : stage;
+		const state = this.paused
+			? "paused"
+			: headPaused
+				? "held at paused row"
+				: laneHeld
+					? "held while editing"
+					: stage;
 		const name = lane === "steer" ? "steering queue" : "follow-ups";
 		const fullTitle = ` ${name} (${items.length}) · ${state} `;
 		const shortTitle = ` ${name} (${items.length}) `;
@@ -195,7 +207,7 @@ class QueueTimelineWidget implements Component {
 		const selectedHere = items.some((item) => item.id === this.editingId);
 		const help = this.editingId
 			? selectedHere
-				? `${dequeue}/${nextRowKeyText()} move · ${REORDER_UP_KEY}/${REORDER_DOWN_KEY} reorder · ${REMOVE_ROW_KEY} remove · ${TOGGLE_LANE_KEY} lane · ${submit} save · ${interrupt} cancel`
+				? `${dequeue}/${nextRowKeyText()} move · ${REORDER_UP_KEY}/${REORDER_DOWN_KEY} reorder · ${REMOVE_ROW_KEY} remove · ${TOGGLE_LANE_KEY} lane · ${PAUSE_ROW_KEY} pause · ${submit} save · ${interrupt} cancel`
 				: `${dequeue}/${nextRowKeyText()} move here · ${interrupt} cancel`
 			: this.paused
 				? this.idle
@@ -227,7 +239,7 @@ class QueueTimelineWidget implements Component {
 				lines.push(`${border("│")} ${fitCell(`${prefix}${body}`, cellWidth)} ${border("│")}`);
 				return;
 			}
-			const marker = item.held || (this.paused && armed)
+			const marker = item.rowPaused || item.held || (this.paused && armed)
 				? "⏸"
 				: item.command
 					? "⚙"
@@ -237,12 +249,15 @@ class QueueTimelineWidget implements Component {
 							? "▶"
 							: "»";
 			const prefix = this.theme.fg(color, `${marker} `);
+			const pausedNote = item.rowPaused
+				? this.theme.fg("dim", head ? " · paused — dispatch holds here" : " · paused")
+				: "";
 			const moved = item.movedLane ? this.theme.fg("dim", " · moves here on save") : "";
 			const commandNote = item.command && !item.movedLane
 				? this.theme.fg("dim", item.command.kind === "fabric-await" && this.awaitNote ? ` · ${this.awaitNote}` : " · runs when idle")
 				: "";
 			const body = this.theme.fg("muted", compactText(item));
-			lines.push(`${border("│")} ${fitCell(`${prefix}${body}${commandNote}${moved}`, cellWidth)} ${border("│")}`);
+			lines.push(`${border("│")} ${fitCell(`${prefix}${body}${commandNote}${pausedNote}${moved}`, cellWidth)} ${border("│")}`);
 			return;
 		}
 
@@ -257,6 +272,9 @@ class QueueTimelineWidget implements Component {
 		const notes: string[] = [];
 		if (item.removed) notes.push(`removed on save · ${REMOVE_ROW_KEY} undoes`);
 		else if (item.movedLane) notes.push(`moves here on save · ${TOGGLE_LANE_KEY} undoes`);
+		if (item.rowPauseDrafted) {
+			notes.push(item.rowPaused ? `pauses on save · ${PAUSE_ROW_KEY} undoes` : `resumes on save · ${PAUSE_ROW_KEY} undoes`);
+		}
 		if (item.command && !item.removed) {
 			notes.push(item.command.kind === "fabric-await" && this.awaitNote ? `command row · ${this.awaitNote}` : "command row · runs when idle");
 		}
@@ -547,6 +565,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				lane,
 				removed: editSession?.isRemoved(item.id) ?? false,
 				movedLane: lane !== item.lane,
+				rowPaused: editSession?.pausedFor(item.id) ?? (item.paused ?? false),
+				rowPauseDrafted: editSession?.pausedFor(item.id) !== undefined,
 				held: heldLane[item.lane] && (modes[item.lane] === "all" || heads[item.lane] === item.id),
 				command: itemCommand({ text, images }),
 			};
@@ -607,7 +627,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// row stops the batch (FIFO): rows behind it dispatch after the control.
 	const takeLaneBatch = (lane: QueueLane): QueuedMessage<ImageContent>[] => {
 		if (paused || blockingActivity || queue.laneLength(lane) === 0 || laneIsHeld(lane)) return [];
-		const isMessage = (item: QueuedMessage<ImageContent>) => itemCommand(item) === undefined;
+		// A row-level pause is a dispatch barrier: the batch stops at the first
+		// paused row and nothing behind it jumps ahead of it.
+		const isMessage = (item: QueuedMessage<ImageContent>) =>
+			itemCommand(item) === undefined && !item.paused;
 		if (queueModes()[lane] === "all") return queue.shiftWhile(lane, isMessage);
 		const head = queue.peek(lane);
 		if (!head || !isMessage(head)) return [];
@@ -660,7 +683,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		// settle boundary and run from dispatchFromIdle.
 		const head = queue.peek(lane);
 		if (lane === "steer" && head && itemCommand(head)) {
-			if (paused || blockingActivity || laneIsHeld(lane)) {
+			if (paused || blockingActivity || head.paused || laneIsHeld(lane)) {
 				renderQueue(ctx);
 				return false;
 			}
@@ -937,6 +960,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return false;
 		}
 		const head = queue.peek(lane);
+		// A paused head row holds dispatch here; nothing behind it jumps ahead.
+		if (head?.paused) {
+			renderQueue(ctx);
+			return false;
+		}
 		if (head && itemCommand(head)) return executeCommandRow(ctx, lane);
 		return sendHeadMessage(ctx, lane);
 	}
@@ -1011,6 +1039,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const sendFollowUpNow = (ctx: ExtensionContext): boolean => {
 		const head = queue.peek("followUp");
 		if (!head) return false;
+		if (head.paused) {
+			ctx.ui.notify(`The next follow-up row is paused (${PAUSE_ROW_KEY} on it resumes delivery)`, "info");
+			return false;
+		}
 		const headCommand = itemCommand(head);
 		if (headCommand) {
 			if (blockingActivity || !ctx.isIdle()) {
@@ -1038,12 +1070,16 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("The queue drains after the current control command finishes", "info");
 			return;
 		}
-		const messages = queue.snapshot().filter((item) => !itemCommand(item));
+		// Paused rows are deliberate holds: a drain skips them and leaves them parked.
+		const heldBack = queue.snapshot().filter((item) => item.paused && !itemCommand(item)).length;
+		const messages = queue.snapshot().filter((item) => !itemCommand(item) && !item.paused);
 		if (messages.length === 0) {
 			ctx.ui.notify(
 				queue.length === 0
 					? "Queue is empty"
-					: "No queued messages to drain; command rows still run when the agent is idle",
+					: heldBack > 0
+						? `No dispatchable queued messages; ${heldBack} paused row${heldBack === 1 ? " stays" : "s stay"} parked`
+						: "No queued messages to drain; command rows still run when the agent is idle",
 				"info",
 			);
 			return;
@@ -1062,10 +1098,16 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return;
 		}
 		for (const message of messages) queue.remove(message.id);
-		const keptCommands = queue.length;
-		const commandNote = keptCommands > 0
-			? `; ${keptCommands} command row${keptCommands === 1 ? " stays" : "s stay"} queued`
-			: "";
+		const keptPaused = queue.snapshot().filter((item) => item.paused && !itemCommand(item)).length;
+		const keptCommands = queue.length - keptPaused;
+		const keptNotes: string[] = [];
+		if (keptCommands > 0) {
+			keptNotes.push(`${keptCommands} command row${keptCommands === 1 ? " stays" : "s stay"} queued`);
+		}
+		if (keptPaused > 0) {
+			keptNotes.push(`${keptPaused} paused row${keptPaused === 1 ? " stays" : "s stay"} parked`);
+		}
+		const commandNote = keptNotes.length > 0 ? `; ${keptNotes.join("; ")}` : "";
 		resumeQueue();
 
 		const idle = ctx.isIdle();
@@ -1108,6 +1150,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		}
 		if (result?.moved) {
 			ctx.ui.notify(`Moved ${result.moved} queued message${result.moved === 1 ? "" : "s"} to the other lane`, "info");
+		}
+		if (result?.held) {
+			ctx.ui.notify(`Paused ${result.held} queued row${result.held === 1 ? "" : "s"} — dispatch stops there until resumed`, "info");
+		}
+		if (result?.released) {
+			ctx.ui.notify(`Resumed ${result.released} queued row${result.released === 1 ? "" : "s"}`, "info");
 		}
 		renderQueue(ctx);
 
@@ -1206,6 +1254,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						renderQueue(ctx);
 						return;
 					}
+					if (matchesKey(data, PAUSE_ROW_KEY)) {
+						editSession.togglePaused(editSession.selectedId);
+						renderQueue(ctx);
+						return;
+					}
 					if (matchesKey(data, REORDER_UP_KEY) || matchesKey(data, REORDER_DOWN_KEY)) {
 						reorderSelectedRow(ctx, matchesKey(data, REORDER_UP_KEY) ? -1 : 1);
 						return;
@@ -1299,8 +1352,17 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 					}
 					if (paused) {
 						resumeQueue();
-						if (ctx.isIdle()) dispatchFromIdle(ctx);
-						else renderQueue(ctx);
+						if (ctx.isIdle()) {
+							if (dispatchFromIdle(ctx)) return;
+							const nextLane: QueueLane = queue.laneLength("steer") > 0 ? "steer" : "followUp";
+							const head = queue.peek(nextLane);
+							if (head?.paused) {
+								renderQueue(ctx);
+								ctx.ui.notify(`Queue resumed — the next ${laneLabel(nextLane)} row is paused (${PAUSE_ROW_KEY} on it resumes)`, "info");
+								return;
+							}
+						}
+						renderQueue(ctx);
 						return;
 					}
 					if (queue.laneLength("followUp") > 0) {
