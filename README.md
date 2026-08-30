@@ -47,7 +47,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Agent working | `Option+Enter` | Add a visible follow-up for after the run |
 | Queue visible | `Option+Up` | Select the most recently queued row |
 | Editing a row | `Option+Up` | Keep the current draft and move to the previous visual row |
-| Editing a row | `Option+Down` | Keep the current draft and move to the next visual row |
+| Editing a row | `Option+Down` | Keep the current draft and move to the next visual row; mirrors the configured `Option+Up` action |
 | Editing a row | Type normally | Edit directly inside the selected row |
 | Editing a row | `Option+X` | Mark the selected row for removal; save deletes it, a second press restores it |
 | Editing a row | `Option+T` | Move the selected row to the other lane when saved |
@@ -65,7 +65,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
 | Peer gate waiting | `Escape` | Cancel the wait and pause the gate row |
 
-`Option+Down`, `Option+W`, `Option+X`, `Option+T`, `Option+P` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings. Terminals outside macOS may label `Option` as `Alt`.
+`Option+W`, `Option+X`, `Option+T`, `Option+P` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings, and the next-row key mirrors whatever `app.message.dequeue` is bound to — rebind that action to `ctrl+up` and next-row becomes `ctrl+down`. A dequeue binding with no `up` twin keeps `Option+Down`. Terminals outside macOS may label `Option` as `Alt`.
 
 ## Pausing at a tool boundary
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Next-row navigation while editing a row now mirrors the configured `app.message.dequeue` chord instead of a hard-coded `alt+down`. The help line already advertised the mirrored key, so a rebound dequeue action — or a terminal that cannot deliver a bare `alt+down`, such as xterm.js, which rewrites it to `ctrl+down` — printed a chord the matcher never accepted. A dequeue binding with no `up` twin, like the Windows and WSL `alt+q` default, still falls back to `alt+down`.
+
 ## 0.13.0 - 2026-08-29
 
 ### Added

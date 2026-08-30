@@ -10,7 +10,15 @@ import {
 	type Theme,
 	type ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, type Component, type EditorComponent } from "@earendil-works/pi-tui";
+import {
+	getKeybindings,
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+	type Component,
+	type EditorComponent,
+	type KeyId,
+} from "@earendil-works/pi-tui";
 import { extractInlineEditorLines } from "./editor-render.ts";
 import { requestFabricPeerAwait, requestFabricPeerCards, type FabricPeerCard } from "./fabric-peers.ts";
 import { requestFabricPrewalk } from "./fabric-prewalk.ts";
@@ -29,7 +37,7 @@ import {
 const WIDGET_ID = "queue-steer.timeline";
 const EDITOR_FEATURES = Symbol.for("@tmustier/pi-editor-features");
 const QUEUE_STEER_FEATURE = "queue-steer";
-const NEXT_ROW_KEY = "alt+down";
+const NEXT_ROW_FALLBACK_KEY: KeyId = "alt+down";
 const SUBMIT_GUARD = Symbol.for("@tmustier/pi-queue-steer.submit-guard");
 
 /** Interop channel for peer extensions (e.g. pi-ledger, which defers its
@@ -102,9 +110,20 @@ function fitCell(content: string, width: number): string {
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
+function deriveNextRowKeys(dequeueKeys: readonly string[]): string[] {
+	return dequeueKeys
+		.filter((key) => /up$/i.test(key))
+		.map((key) => (key.endsWith("Up") ? `${key.slice(0, -2)}Down` : `${key.slice(0, -2)}down`));
+}
+
+export function nextRowKeys(): KeyId[] {
+	const derived = deriveNextRowKeys(getKeybindings().getKeys("app.message.dequeue")) as KeyId[];
+	return derived.length > 0 ? derived : [NEXT_ROW_FALLBACK_KEY];
+}
+
 function nextRowKeyText(): string {
-	const previous = keyText("app.message.dequeue");
-	return /up$/i.test(previous) ? previous.replace(/up$/i, "down") : "alt+down";
+	const derived = deriveNextRowKeys(keyText("app.message.dequeue").split("/"));
+	return derived.length > 0 ? derived.join("/") : NEXT_ROW_FALLBACK_KEY;
 }
 
 interface QueueModes {
@@ -1240,7 +1259,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						selectQueueItem(ctx, "previous");
 						return;
 					}
-					if (matchesKey(data, NEXT_ROW_KEY)) {
+					if (nextRowKeys().some((key) => matchesKey(data, key))) {
 						selectQueueItem(ctx, "next");
 						return;
 					}
