@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.3 - 2026-08-31
+
+### Fixed
+
+- A compaction no longer latches the queue behind "Queued messages will run after compaction finishes" forever. Composer input submitted during a compaction parks in Pi's private post-compaction queue and the finish defers until that flushed run starts and settles — but when the flush died quietly (prompt preflight rejection, an aborted tail, a command that never runs), no settle ever arrived, the compaction activity never concluded, and every empty-composer `Enter` was refused with no compaction actually running. The finish now carries a grace deadline: if no flushed turn materializes within it, the vanished input is given up on and the activity concludes through the normal path, still keeping queued rows behind a flush run that does start.
+
 ## 0.13.2 - 2026-08-31
 
 ### Fixed

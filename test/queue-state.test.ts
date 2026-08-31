@@ -14,7 +14,7 @@ import {
 	type FabricPeerCard,
 } from "../fabric-peers.ts";
 import { FABRIC_PREWALK_REQUEST_EVENT } from "../fabric-prewalk.ts";
-import queueSteerExtension from "../index.ts";
+import queueSteerExtension, { NATIVE_FLUSH_GRACE_MS } from "../index.ts";
 import { isQueueSnapshot, latestQueueSnapshot, queueSnapshotOf, QUEUE_SNAPSHOT_TYPE } from "../queue-persistence.ts";
 import { DeliveryQueue, isQueueableSubmission, parseQueuedCommand, QueueEditSession, type QueueLane } from "../queue-state.ts";
 
@@ -2784,3 +2784,88 @@ test("Drain skips paused rows and leaves them parked", async () => {
 	assert.match(renderWidget(harness), /paused/);
 });
 
+
+test("concludes a latched compaction when the post-compaction flush never starts a run", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "queued question");
+	harness.setIdle(false);
+
+	await harness.emit("session_before_compact", { reason: "threshold" });
+
+	// Composer input during the compaction parks natively and latches the finish.
+	harness.editor.onSubmit?.("typed during compaction");
+
+	// The compaction concludes; the flushed input never becomes a run.
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	harness.editor.handleInput("enter");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 0);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /run after compaction finishes/);
+	const refusals = harness.notifications.filter((n) => /compaction finishes/.test(n.message)).length;
+
+	// The grace deadline concludes the latched activity; Enter then drains
+	// without another refusal.
+	await new Promise((resolve) => setTimeout(resolve, NATIVE_FLUSH_GRACE_MS + 200));
+	harness.editor.handleInput("enter");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 1, "queue must recover once the flush is given up on");
+	assert.equal(
+		harness.notifications.filter((n) => /compaction finishes/.test(n.message)).length,
+		refusals,
+		"the queue must not refuse again after the grace deadline",
+	);
+});
+
+test("the native-flush grace cancels once the flushed run starts its turn", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "queued question");
+	harness.setIdle(false);
+
+	await harness.emit("session_before_compact", { reason: "threshold" });
+	harness.editor.onSubmit?.("typed during compaction");
+
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	// The flush run starts well inside the grace window; its settle concludes.
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	await harness.emit("turn_start");
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	harness.editor.handleInput("enter");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 1, "flushed run settle must conclude the compaction normally");
+});
+
+test("a fresh compaction supersedes a pending native-flush grace", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "queued question");
+	harness.setIdle(false);
+
+	await harness.emit("session_before_compact", { reason: "threshold" });
+	harness.editor.onSubmit?.("typed during compaction");
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	// A second auto-compaction arms while the first latch is still held.
+	await harness.emit("agent_start");
+	harness.setIdle(false);
+	await harness.emit("session_before_compact", { reason: "threshold" });
+
+	// The stale grace deadline must not conclude the second compaction early.
+	await new Promise((resolve) => setTimeout(resolve, NATIVE_FLUSH_GRACE_MS + 200));
+	// The second compaction still concludes through its own settle path.
+	await harness.emit("turn_start");
+	await harness.emit("agent_settled");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	harness.editor.handleInput("enter");
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	assert.equal(harness.sent.length, 1);
+});

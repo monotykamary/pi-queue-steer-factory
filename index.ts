@@ -75,6 +75,9 @@ declare global {
 const DRAIN_COMMAND = "queue-drain";
 const PAUSE_COMMAND = "pause";
 const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
+// Grace window for Pi's post-compaction flush of natively parked composer
+// input to start its run before the latched compaction concludes anyway.
+export const NATIVE_FLUSH_GRACE_MS = 2000;
 const REMOVE_ROW_KEY = "alt+x";
 const PAUSE_ROW_KEY = "alt+p";
 const TOGGLE_LANE_KEY = "alt+t";
@@ -442,6 +445,14 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let compactionFinishTimer: ReturnType<typeof setTimeout> | undefined;
 	let nativeCompactionInputQueued = false;
 	let nativeCompactionTurnStarted = false;
+	// Pi parks composer input submitted during a compaction in its private
+	// post-compaction queue and flushes it as a run afterwards. The latch waits
+	// for that flush run to turn_start and settle; when the flush instead dies
+	// quietly (prompt preflight rejection, an aborted tail, a command that never
+	// runs), nothing would ever settle again and the latch would stick forever.
+	// A grace deadline concludes the activity when no flushed turn materialized.
+	let nativeFlushGraceTimer: ReturnType<typeof setTimeout> | undefined;
+	let compactionEpoch = 0;
 	let extensionCompactionInFlight = false;
 	// A compact-and-retry that ended in session_compact_failed is not recovery:
 	// the error hold stays parked for an explicit Enter instead of releasing at
@@ -989,6 +1000,27 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return sendHeadMessage(ctx, lane);
 	}
 
+	const armNativeFlushGrace = (ctx: ExtensionContext, activity: "compact" | "auto-compact"): void => {
+		if (nativeFlushGraceTimer) return;
+		const epoch = compactionEpoch;
+		nativeFlushGraceTimer = setTimeout(() => {
+			nativeFlushGraceTimer = undefined;
+			if (epoch !== compactionEpoch) return;
+			if (!isCompacting() || !nativeCompactionInputQueued || nativeCompactionTurnStarted) return;
+			// The flushed run never started, so no settle can conclude the
+			// activity on its own; give up on the vanished input and finish.
+			nativeCompactionInputQueued = false;
+			nativeCompactionTurnStarted = false;
+			deferCompactionFinish(activeContext ?? ctx, activity);
+		}, NATIVE_FLUSH_GRACE_MS);
+	};
+
+	const cancelNativeFlushGrace = (): void => {
+		if (nativeFlushGraceTimer === undefined) return;
+		clearTimeout(nativeFlushGraceTimer);
+		nativeFlushGraceTimer = undefined;
+	};
+
 	const deferCompactionFinish = (
 		ctx: ExtensionContext,
 		activity: "compact" | "auto-compact",
@@ -999,9 +1031,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			// Pi flushes ordinary TUI submissions after compaction without
 			// awaiting prompt preflight. Keep command rows behind that native run.
 			if (nativeCompactionInputQueued) {
+				armNativeFlushGrace(activeContext ?? ctx, activity);
 				renderQueue(activeContext ?? ctx);
 				return;
 			}
+			cancelNativeFlushGrace();
 			blockingActivity = undefined;
 			nativeCompactionInputQueued = false;
 			nativeCompactionTurnStarted = false;
@@ -1020,6 +1054,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const startCompaction = (ctx: ExtensionContext, instructions: string | undefined): boolean => {
 		blockingActivity = "compact";
 		broadcastQueueState();
+		compactionEpoch += 1;
+		cancelNativeFlushGrace();
 		nativeCompactionInputQueued = false;
 		nativeCompactionTurnStarted = false;
 		try {
@@ -1677,6 +1713,8 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		activeContext = ctx;
 		if (blockingActivity || event.reason === "manual") return;
 		blockingActivity = "auto-compact";
+		compactionEpoch += 1;
+		cancelNativeFlushGrace();
 		compactionRecoveryFailed = false;
 		compactionIsOverflowRecovery = event.reason === "overflow";
 		nativeCompactionInputQueued = false;
@@ -1690,7 +1728,11 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 
 	pi.on("turn_start", (_event, ctx) => {
 		activeContext = ctx;
-		if (isCompacting() && nativeCompactionInputQueued) nativeCompactionTurnStarted = true;
+		if (isCompacting() && nativeCompactionInputQueued) {
+			nativeCompactionTurnStarted = true;
+			// The flushed run is live; its settle owns the finish now.
+			cancelNativeFlushGrace();
+		}
 	});
 
 	pi.on("turn_end", async (event, ctx) => {
@@ -1798,6 +1840,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		if (blockingActivity === "compact" || blockingActivity === "auto-compact") {
 			const activity = blockingActivity;
 			if (nativeCompactionInputQueued && !nativeCompactionTurnStarted) {
+				armNativeFlushGrace(ctx, activity);
 				renderQueue(ctx);
 				return;
 			}
@@ -1811,6 +1854,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 	});
 
 	pi.on("session_shutdown", (event, ctx) => {
+		cancelNativeFlushGrace();
 		const queuedNewHandoff =
 			event.reason === "new"
 			&& plannedNewSession
