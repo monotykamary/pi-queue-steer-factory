@@ -138,7 +138,7 @@ interface TimelineItem extends QueuedMessage<ImageContent> {
 	held: boolean;
 	/** Effective row-level dispatch hold (draft value when the edit session touched it). */
 	rowPaused: boolean;
-	/** True when the current edit session drafted a pause toggle for this row. */
+	/** True when the current edit session drafted a pause change that differs from the row's committed hold. */
 	rowPauseDrafted: boolean;
 	command: QueuedCommand | undefined;
 }
@@ -291,7 +291,7 @@ class QueueTimelineWidget implements Component {
 		const notes: string[] = [];
 		if (item.removed) notes.push(`removed on save · ${REMOVE_ROW_KEY} undoes`);
 		else if (item.movedLane) notes.push(`moves here on save · ${TOGGLE_LANE_KEY} undoes`);
-		if (item.rowPauseDrafted) {
+		if (item.rowPauseDrafted && !item.removed) {
 			notes.push(item.rowPaused ? `pauses on save · ${PAUSE_ROW_KEY} undoes` : `resumes on save · ${PAUSE_ROW_KEY} undoes`);
 		}
 		if (item.command && !item.removed) {
@@ -585,7 +585,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				removed: editSession?.isRemoved(item.id) ?? false,
 				movedLane: lane !== item.lane,
 				rowPaused: editSession?.pausedFor(item.id) ?? (item.paused ?? false),
-				rowPauseDrafted: editSession?.pausedFor(item.id) !== undefined,
+				rowPauseDrafted: editSession?.pausedFor(item.id) !== undefined
+					&& editSession.pausedFor(item.id) !== (item.paused ?? false),
 				held: heldLane[item.lane] && (modes[item.lane] === "all" || heads[item.lane] === item.id),
 				command: itemCommand({ text, images }),
 			};
@@ -1274,7 +1275,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						return;
 					}
 					if (matchesKey(data, PAUSE_ROW_KEY)) {
-						editSession.togglePaused(editSession.selectedId);
+						// A removed row is deleted on save, so its dispatch hold is
+						// meaningless; keep the removal mark and ignore the toggle.
+						if (!editSession.isRemoved(editSession.selectedId)) {
+							editSession.togglePaused(editSession.selectedId);
+						}
 						renderQueue(ctx);
 						return;
 					}

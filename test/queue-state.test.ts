@@ -2684,6 +2684,65 @@ test("Escape rolls back an unsaved row pause", async () => {
 	assert.deepEqual(harness.sent.map((s) => s.content), ["row one", "row two"]);
 });
 
+test("Editing a row without drafting a pause shows no pause note", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "row one");
+	await enqueue(harness, "steer", "row two");
+
+	// Merely selecting and editing rows must not advertise a pause change.
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("alt-up");
+	const rendered = renderWidget(harness);
+	assert.doesNotMatch(rendered, /resumes on save/);
+	assert.doesNotMatch(rendered, /pauses on save/);
+});
+
+test("Editing an already-paused row shows no pause note until Option+P drafts a change", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "row one");
+
+	// Commit a real pause first.
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Paused 1 queued row/);
+
+	// Re-entering the edit session on the paused row stays silent.
+	harness.editor.handleInput("alt-up");
+	assert.doesNotMatch(renderWidget(harness), /pauses on save/);
+
+	// Only an actual Option+P toggle advertises the change.
+	harness.editor.handleInput("\x1bp");
+	assert.match(renderWidget(harness), /resumes on save/);
+	harness.editor.handleInput("escape");
+});
+
+test("A removed row never advertises a pause change and ignores Option+P", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "row one");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bp");
+	harness.editor.handleInput("\x1bx");
+	let rendered = renderWidget(harness);
+	assert.match(rendered, /removed on save/);
+	assert.doesNotMatch(rendered, /pauses on save/);
+	assert.doesNotMatch(rendered, /resumes on save/);
+
+	// Option+P on the removed row is a no-op and never unmutes the pause note.
+	harness.editor.handleInput("\x1bp");
+	rendered = renderWidget(harness);
+	assert.match(rendered, /removed on save/);
+	assert.doesNotMatch(rendered, /pauses on save/);
+	assert.doesNotMatch(rendered, /resumes on save/);
+
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Removed 1 queued message/);
+});
+
 test("Resuming past a paused head reports the hold instead of dispatching", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
