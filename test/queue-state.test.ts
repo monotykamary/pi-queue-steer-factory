@@ -875,6 +875,55 @@ test("Escape rolls back a removal mark with the rest of the session", async () =
 	assert.deepEqual(harness.sent[0], { content: "nearly gone", options: { deliverAs: "steer" } });
 });
 
+test("saving a removal persists the trimmed queue before shutdown", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "cancel me");
+	await enqueue(harness, "followUp", "keep me");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bx");
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications[0]?.message ?? "", /Removed 1 queued message/);
+
+	assert.equal(harness.appendedEntries.length, 1);
+	const recorded = harness.appendedEntries[0];
+	assert.ok(recorded, "a removal save should append a superseding snapshot");
+	assert.equal(recorded.customType, QUEUE_SNAPSHOT_TYPE);
+	if (!isQueueSnapshot(recorded.data)) assert.fail("recorded payload should be a readable snapshot");
+	assert.deepEqual(recorded.data.rows.map((row) => row.text), ["cancel me"]);
+	assert.equal(recorded.data.rows[0]?.lane, "steer");
+
+	// The retired row never returns on a later resume of this session file.
+	const entries = harness.appendedEntries.map((entry) => ({ type: "custom", ...entry }));
+	const resumed = createHarness({ sessionEntries: entries });
+	await resumed.emit("session_start", { reason: "resume" });
+	assert.match(renderWidget(resumed), /cancel me/);
+	assert.doesNotMatch(renderWidget(resumed), /keep me/);
+});
+
+test("removing the last row tombstones the persisted queue", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "last one standing");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bx");
+	harness.editor.handleInput("enter");
+	assert.match(harness.notifications[0]?.message ?? "", /Removed 1 queued message/);
+
+	assert.equal(harness.appendedEntries.length, 1);
+	const tombstone = harness.appendedEntries[0]?.data;
+	assert.ok(isQueueSnapshot(tombstone));
+	assert.deepEqual(tombstone.rows, []);
+
+	// An empty snapshot supersedes the stale one, so a resume restores nothing.
+	const resumed = createHarness({ sessionEntries: [...harness.appendedEntries] });
+	await resumed.emit("session_start", { reason: "resume" });
+	assert.equal(resumed.widget, undefined);
+	assert.equal(resumed.sent.length, 0);
+});
+
 test("a removal-marked head stays pinned at delivery boundaries", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");

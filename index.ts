@@ -1213,6 +1213,22 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (result?.released) {
 			ctx.ui.notify(`Resumed ${result.released} queued row${result.released === 1 ? "" : "s"}`, "info");
 		}
+		if (result && (result.updated || result.removed || result.moved || result.held || result.released)) {
+			// A save must not depend on a graceful shutdown to survive: a snapshot
+			// written only at exit lets an earlier one restore edited-away rows
+			// after a crash, and an emptied queue never writes a superseding
+			// snapshot at all. Tombstone the retired queue when the save removed
+			// the last row so nothing resurrects on resume.
+			try {
+				if (queue.length > 0) persistQueueSnapshot(pi, queue.snapshot(), paused);
+				else persistQueueTombstone(pi);
+			} catch (error) {
+				ctx.ui.notify(
+					`Could not persist the saved queue: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+			}
+		}
 		renderQueue(ctx);
 
 		// A pinned head may have let the agent settle while it was edited.

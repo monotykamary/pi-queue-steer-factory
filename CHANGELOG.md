@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.4 - 2026-08-31
+
+### Fixed
+
+- Removing a queued row (`Option+X`, save) no longer resurrects on the next restart. Snapshot persistence used to happen only at `session_shutdown` and was skipped entirely once the queue emptied, so the previous snapshot — still containing the removed row — was the newest restorable state and `resume` brought the row back. Every committed row save now appends a superseding snapshot immediately, and a save that empties the queue writes a tombstone instead, so removals (and row edits) survive ungraceful exits too.
+
 ## 0.13.3 - 2026-08-31
 
 ### Fixed
