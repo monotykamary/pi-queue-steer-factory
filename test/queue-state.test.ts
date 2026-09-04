@@ -607,6 +607,7 @@ test("restores an idle row after a synchronous send failure", async () => {
 
 	await harness.emit("agent_settled");
 	assert.equal(harness.sent.length, 0);
+	assert.equal(harness.appendedEntries.length, 0);
 	assert.match(renderWidget(harness), /retry me/);
 	assert.match(harness.notifications.at(-1)?.message ?? "", /synthetic send failure/);
 });
@@ -2257,6 +2258,7 @@ test("a send failure during a drain restores every row and pauses", async () => 
 
 	await harness.runCommand("queue-drain");
 	assert.equal(harness.sent.length, 0);
+	assert.equal(harness.appendedEntries.length, 0);
 	const rendered = renderWidget(harness);
 	assert.match(rendered, /one/);
 	assert.match(rendered, /two/);
@@ -2341,6 +2343,119 @@ test("resume restores rows paused until an explicit empty-composer Enter", async
 	});
 	assert.doesNotMatch(renderWidget(harness), /restored steering/);
 	assert.match(renderWidget(harness), /restored follow-up/);
+});
+
+test("successful dispatch supersedes a restored snapshot with the remaining rows", async () => {
+	const source = new DeliveryQueue<ImageContent>();
+	source.enqueue("steer", "already delivered");
+	source.enqueue("followUp", "still queued");
+	const original = {
+		type: "custom",
+		customType: QUEUE_SNAPSHOT_TYPE,
+		data: queueSnapshotOf(source.snapshot(), true),
+	};
+	const harness = createHarness({ sessionEntries: [original] });
+	harness.setIdle(true);
+	await harness.emit("session_start", { reason: "resume" });
+
+	harness.editor.handleInput("enter");
+	await waitFor(() => harness.sent.length === 1);
+
+	const superseding = harness.appendedEntries.at(-1);
+	assert.ok(superseding, "accepted delivery should persist the remaining queue");
+	assert.ok(isQueueSnapshot(superseding.data));
+	assert.deepEqual(superseding.data.rows.map((row) => row.text), ["still queued"]);
+
+	const branch = [original, ...harness.appendedEntries.map((entry) => ({ type: "custom", ...entry }))];
+	const restarted = createHarness({ sessionEntries: branch });
+	await restarted.emit("session_start", { reason: "startup" });
+	assert.doesNotMatch(renderWidget(restarted), /already delivered/);
+	assert.match(renderWidget(restarted), /still queued/);
+});
+
+test("successful dispatch of the last restored row tombstones it before restart", async () => {
+	const source = new DeliveryQueue<ImageContent>();
+	source.enqueue("followUp", "already delivered");
+	const original = {
+		type: "custom",
+		customType: QUEUE_SNAPSHOT_TYPE,
+		data: queueSnapshotOf(source.snapshot(), true),
+	};
+	const harness = createHarness({ sessionEntries: [original] });
+	harness.setIdle(true);
+	await harness.emit("session_start", { reason: "resume" });
+
+	harness.editor.handleInput("enter");
+	await waitFor(() => harness.sent.length === 1);
+
+	const tombstone = harness.appendedEntries.at(-1)?.data;
+	assert.ok(isQueueSnapshot(tombstone));
+	assert.deepEqual(tombstone.rows, []);
+
+	const branch = [original, ...harness.appendedEntries.map((entry) => ({ type: "custom", ...entry }))];
+	const restarted = createHarness({ sessionEntries: branch });
+	await restarted.emit("session_start", { reason: "resume" });
+	assert.equal(restarted.widget, undefined);
+});
+
+test("partial turn-boundary delivery persists only the unsent restored tail", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-persist-partial-"));
+	mkdirSync(join(cwd, ".pi"));
+	writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ steeringMode: "all" }));
+	const source = new DeliveryQueue<ImageContent>();
+	source.enqueue("steer", "accepted first");
+	source.enqueue("steer", "retry second");
+	source.enqueue("steer", "retry third");
+	const original = {
+		type: "custom",
+		customType: QUEUE_SNAPSHOT_TYPE,
+		data: queueSnapshotOf(source.snapshot(), true),
+	};
+	try {
+		const harness = createHarness({ cwd, projectTrusted: true, sessionEntries: [original], sendFailureAt: 2 });
+		await harness.emit("session_start", { reason: "resume" });
+		harness.editor.handleInput("enter");
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+
+		assert.deepEqual(harness.sent.map((item) => item.content), ["accepted first"]);
+		const superseding = harness.appendedEntries.at(-1)?.data;
+		assert.ok(isQueueSnapshot(superseding));
+		assert.deepEqual(superseding.rows.map((row) => row.text), ["retry second", "retry third"]);
+
+		const branch = [original, ...harness.appendedEntries.map((entry) => ({ type: "custom", ...entry }))];
+		const restarted = createHarness({ cwd, projectTrusted: true, sessionEntries: branch });
+		await restarted.emit("session_start", { reason: "startup" });
+		const rendered = renderWidget(restarted);
+		assert.doesNotMatch(rendered, /accepted first/);
+		assert.match(rendered, /retry second/);
+		assert.match(rendered, /retry third/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("draining restored messages tombstones them before restart", async () => {
+	const source = new DeliveryQueue<ImageContent>();
+	source.enqueue("steer", "drain one");
+	source.enqueue("followUp", "drain two");
+	const original = {
+		type: "custom",
+		customType: QUEUE_SNAPSHOT_TYPE,
+		data: queueSnapshotOf(source.snapshot(), true),
+	};
+	const harness = createHarness({ sessionEntries: [original] });
+	await harness.emit("session_start", { reason: "resume" });
+
+	await harness.runCommand("queue-drain");
+	assert.deepEqual(harness.sent.map((item) => item.content), ["drain one\ndrain two"]);
+	const tombstone = harness.appendedEntries.at(-1)?.data;
+	assert.ok(isQueueSnapshot(tombstone));
+	assert.deepEqual(tombstone.rows, []);
+
+	const branch = [original, ...harness.appendedEntries.map((entry) => ({ type: "custom", ...entry }))];
+	const restarted = createHarness({ sessionEntries: branch });
+	await restarted.emit("session_start", { reason: "resume" });
+	assert.equal(restarted.widget, undefined);
 });
 
 test("only startup and resume restores; new, fork and reload runtimes stay pristine", async () => {

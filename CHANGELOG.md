@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.5 - 2026-09-04
+
+### Fixed
+
+- Already-delivered queue rows no longer resurrect on the next restart. Successful message handoffs, drains, and consumed command rows now supersede the previous snapshot immediately with the remaining queue, writing a tombstone when nothing remains; a partial synchronous batch failure records only its unsent tail.
+
 ## 0.13.4 - 2026-08-31
 
 ### Fixed

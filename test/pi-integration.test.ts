@@ -21,6 +21,7 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import queueSteerExtension from "../index.ts";
+import { latestQueueSnapshot } from "../queue-persistence.ts";
 
 type CompactionEndEvent = Extract<AgentSessionEvent, { type: "compaction_end" }>;
 type AgentStartEvent = Extract<AgentSessionEvent, { type: "agent_start" }>;
@@ -504,6 +505,7 @@ test("real registered drain command pours queued rows into one steering message"
 		assert.equal(texts.filter((text) => text === "steer one\nlater one\nlater two").length, 1);
 		assert.equal(harness.session.getSteeringMessages().length, 0);
 		assert.equal(harness.session.getFollowUpMessages().length, 0);
+		assert.deepEqual(latestQueueSnapshot(harness.session.sessionManager.getBranch())?.rows, []);
 	} finally {
 		await harness.cleanup();
 	}

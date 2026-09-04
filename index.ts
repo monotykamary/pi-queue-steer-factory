@@ -653,6 +653,21 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		);
 	};
 
+	// The newest custom entry is authoritative on resume. Any committed
+	// consumption must therefore record the remaining rows immediately; an
+	// empty queue needs an explicit tombstone because ordinary snapshots skip it.
+	const persistCommittedQueue = (ctx: ExtensionContext): void => {
+		try {
+			if (queue.length > 0) persistQueueSnapshot(pi, queue.snapshot(), paused);
+			else persistQueueTombstone(pi);
+		} catch (error) {
+			ctx.ui.notify(
+				`Could not persist updated queue state: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+		}
+	};
+
 	// Message rows only; dispatchLaneAtBoundary executes a steered head command
 	// row itself, and follow-up command rows wait for agent_settled. A command
 	// row stops the batch (FIFO): rows behind it dispatch after the control.
@@ -691,6 +706,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				pi.sendUserMessage(userContent(item), { deliverAs: lane });
 				submitted += 1;
 			}
+			persistCommittedQueue(ctx);
 			// The public send API is fire-and-forget. Once invoked, do not infer
 			// rejection from aggregate queue timing: a delayed preflight could
 			// otherwise accept the original after we restored and duplicate it.
@@ -698,6 +714,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			queue.prependMany(items.slice(submitted));
 			renderQueue(ctx);
+			if (submitted > 0) persistCommittedQueue(ctx);
 			ctx.ui.notify(
 				`Could not deliver queued ${laneLabel(lane)}: ${error instanceof Error ? error.message : String(error)}`,
 				"error",
@@ -766,6 +783,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		queue.remove(item.id);
 		blockingActivity = undefined;
 		resumeQueue();
+		persistCommittedQueue(ctx);
 		renderQueue(ctx);
 		if (!editSession && queue.length > 0 && ctx.isIdle()) dispatchFromIdle(ctx);
 	};
@@ -933,13 +951,17 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		resumeQueue();
 		renderQueue(ctx);
 		if (command.kind === "compact") {
-			if (startCompaction(ctx, command.instructions)) return true;
+			if (startCompaction(ctx, command.instructions)) {
+				persistCommittedQueue(ctx);
+				return true;
+			}
 			queue.prepend(next);
 			pauseQueue();
 			renderQueue(ctx);
 			return false;
 		}
 		blockingActivity = "reload";
+		persistCommittedQueue(ctx);
 		// Defer so the extension runtime is never torn down from inside this handler.
 		commandSubmitTimer = setTimeout(() => {
 			commandSubmitTimer = undefined;
@@ -963,6 +985,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		renderQueue(ctx);
 		try {
 			pi.sendUserMessage(userContent(prepared), deliverAs ? { deliverAs } : undefined);
+			persistCommittedQueue(ctx);
 			return true;
 		} catch (error) {
 			queue.prepend(head);
@@ -1179,6 +1202,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			);
 			return;
 		}
+		persistCommittedQueue(ctx);
 		renderQueue(ctx);
 		ctx.ui.notify(
 			idle
@@ -1214,20 +1238,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(`Resumed ${result.released} queued row${result.released === 1 ? "" : "s"}`, "info");
 		}
 		if (result && (result.updated || result.removed || result.moved || result.held || result.released)) {
-			// A save must not depend on a graceful shutdown to survive: a snapshot
-			// written only at exit lets an earlier one restore edited-away rows
-			// after a crash, and an emptied queue never writes a superseding
-			// snapshot at all. Tombstone the retired queue when the save removed
-			// the last row so nothing resurrects on resume.
-			try {
-				if (queue.length > 0) persistQueueSnapshot(pi, queue.snapshot(), paused);
-				else persistQueueTombstone(pi);
-			} catch (error) {
-				ctx.ui.notify(
-					`Could not persist the saved queue: ${error instanceof Error ? error.message : String(error)}`,
-					"error",
-				);
-			}
+			// Save committed edits now so a crash cannot revive an older row shape.
+			persistCommittedQueue(ctx);
 		}
 		renderQueue(ctx);
 
@@ -1478,6 +1490,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		);
 		if (gates.length > 0) {
 			for (const gate of gates) queue.remove(gate.id);
+			persistCommittedQueue(ctx);
 			renderQueue(ctx);
 			ctx.ui.notify(
 				gates.length === 1 ? "Removed the peer settle gate" : `Removed ${gates.length} peer settle gates`,
