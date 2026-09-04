@@ -5,7 +5,7 @@
 
 A visible steering, follow-up, and session-control timeline for [Pi](https://github.com/earendil-works/pi-mono), with acknowledged [`/fabric prewalk`](https://github.com/monotykamary/pi-fabric) barriers.
 
-Queue instructions while the agent works. Steering stays in a blue next-turn box. Follow-ups stay in a yellow after-this-run box beneath it. Both lanes remain independent first-in, first-out queues and keep Pi’s delivery timing.
+Queue instructions while the agent works. Every row keeps its Pi delivery timing — blue steering at a turn boundary, yellow follow-up after a run — inside one first-in, first-out timeline. Consecutive rows share a coloured box, and alternating steering and follow-up rows stay visibly interleaved in the order you queued them.
 
 Move into any row to edit it. The selected row becomes the live Pi editor, with its cursor, wrapping, paste handling, autocomplete and custom-editor behaviour intact.
 
@@ -43,8 +43,8 @@ The extension follows your configured Pi action bindings. These are the default 
 
 | Context | Key | Action |
 |---|---|---|
-| Agent working | `Enter` | Add visible steering for Pi’s next safe turn boundary |
-| Agent working | `Option+Enter` | Add a visible follow-up for after the run |
+| Agent working | `Enter` | Append visible steering; it runs at its next safe turn boundary after earlier rows |
+| Agent working | `Option+Enter` | Append a visible follow-up; it runs after earlier rows and the active run |
 | Queue visible | `Option+Up` | Select the most recently queued row |
 | Editing a row | `Option+Up` | Keep the current draft and move to the previous visual row |
 | Editing a row | `Option+Down` | Keep the current draft and move to the next visual row; mirrors the configured `Option+Up` action |
@@ -55,8 +55,8 @@ The extension follows your configured Pi action bindings. These are the default 
 | Editing a row | `Option+Shift+Up` / `Option+Shift+Down` | Reorder the selected row within its lane; positions apply immediately and roll back on `Escape` |
 | Editing a row | `Enter` or `Option+Enter` | Save all row edits without changing their lanes |
 | Editing a row | `Escape` | Cancel the session and roll back all unsaved row edits |
-| Empty composer, follow-up queued | `Enter` | Promote the oldest follow-up to steering now |
-| Queue paused after an abort | `Enter` | Resume from the next steering row, or the next follow-up |
+| Empty composer, follow-up at the timeline head | `Enter` | Promote that next follow-up to steering now |
+| Queue paused after an abort | `Enter` | Resume from the next timeline row |
 | Queue paused after a run error | `Enter` | Resume manually; a recovered run (built-in retry, auto-compact, pi-retry) releases the queue first |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
 | Agent stopped | `Option+Enter` | Queue a message, skill/template, or control command (`/compact`, `/reload`, `/new`, `/model`, `/thinking`, `/fabric prewalk`) visibly and paused |
@@ -73,7 +73,7 @@ Interrupting a run mid-tool (`Escape`) kills the executing tool outright. `/paus
 
 ## Pausing a single row
 
-The whole-queue pause stops everything; sometimes the agent should keep working until it reaches one specific row. While editing the queue (`Option+Up`), press `Option+P` to pause or resume the selected row where it sits. A paused row is a dispatch barrier: earlier rows still send on their normal boundaries, and once the paused row reaches the front of its lane delivery stops there — rows behind it never jump ahead — until you select it again and press `Option+P` to resume. The pause belongs to the row like its lane does: it survives a save, persists across restart and resume, and an unsaved toggle rolls back with the rest of the editing session on `Escape`. A drain skips paused rows and leaves them parked.
+The whole-queue pause stops everything; sometimes the agent should keep working until it reaches one specific row. While editing the queue (`Option+Up`), press `Option+P` to pause or resume the selected row where it sits. A paused row is a dispatch barrier: earlier rows still send on their normal boundaries, and once the paused row reaches the timeline head delivery stops there — rows behind it never jump ahead, regardless of lane — until you select it again and press `Option+P` to resume. The pause belongs to the row like its lane does: it survives a save, persists across restart and resume, and an unsaved toggle rolls back with the rest of the editing session on `Escape`. A drain skips paused rows and leaves them parked.
 
 ## Peer settle gates
 
@@ -81,17 +81,19 @@ When another Pi Fabric session is running in the same project, queue the edit wo
 
 ## Delivery semantics
 
-The extension keeps Pi’s 2 delivery classes:
+The extension keeps Pi’s 2 delivery classes inside one ordered timeline:
 
-- steering reaches the current run at Pi’s next safe turn boundary
-- follow-ups wait until the run finishes
-- the blue steering box remains above the yellow follow-up box
-- each lane keeps its own first-in, first-out order
+- steering at the timeline head reaches the current run at Pi’s next safe turn boundary
+- a follow-up at the head waits until the current run finishes
+- later rows never overtake the head because they use the other delivery class
+- consecutive rows in one lane share a coloured box; blue and yellow boxes can alternate
 - reordered rows keep their stable IDs, text drafts and attachments
 - reordering waits while a lane toggle is pending; the lane move lands first on save
-- Pi’s `one-at-a-time` and `all` settings apply independently at active-run delivery boundaries
+- Pi’s `one-at-a-time` and `all` settings still apply per lane, but an `all` batch stops at the next lane switch, command, or paused row
 
-The extension hands messages back to Pi's native queues only when their delivery boundary arrives. They remain visible and editable before that point. Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
+This makes both directions composable. Queueing `follow-up A → steer A → follow-up B` starts A after the current run, injects the steering into A at its next turn boundary, then starts B only after that run settles. While an agent is working, enter that sequence with `Option+Enter`, `Enter`, then `Option+Enter`; queueing steering before a follow-up keeps the inverse relationship just as strictly.
+
+The extension hands the timeline head back to Pi only when that row's delivery boundary arrives. Rows remain visible and editable before that point, and Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
 
 ## Run errors and retries
 
@@ -146,7 +148,7 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 
 ## Draining the queue
 
-`/queue-drain` empties both lanes into the run as a single combined message. Row texts join in timeline order — steering rows first, then follow-ups — expanding prompt templates and skills as they go, with every row's image attachments appended in the same order.
+`/queue-drain` empties both lanes into the run as a single combined message. Row texts join in exact global timeline order, expanding prompt templates and skills as they go, with every row's image attachments appended in the same order.
 
 - during a run, the combined message reaches Pi as one steering message
 - while stopped, the combined message starts a new run directly
@@ -169,13 +171,13 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 - image-only rows survive text clearing; `Option+X` removes them
 - an unrelated composer draft is stashed and restored when editing ends
 
-A touched head row is pinned until you save or cancel. In `one-at-a-time` mode, later rows do not block the head. In `all` mode, editing any row holds that whole lane at active-run delivery boundaries.
+A touched head row is pinned until you save or cancel. In `one-at-a-time` mode, later rows do not block the head. In `all` mode, editing any row in the contiguous dispatchable head segment holds that batch at active-run delivery boundaries; rows beyond a lane switch, command, or paused row are not part of it.
 
 ## Abort and recovery
 
 Aborting a run pauses both visible lanes. This prevents a follow-up from starting immediately after the abort.
 
-Press `Enter` on the empty composer to resume; the same keypress sends rows queued while stopped. A synchronous handoff or preflight failure returns the affected batch to the front of its lane.
+Press `Enter` on the empty composer to resume; the same keypress sends rows queued while stopped. A synchronous handoff or preflight failure returns the affected batch to the global timeline head.
 
 Committed rows also survive quitting and resuming Pi. On shutdown the extension records the queue in the session file as an invisible custom entry that stays out of the transcript and out of the model context. Committed row saves and accepted deliveries immediately supersede that entry with the remaining queue—or an empty tombstone—so edited-away or already-sent rows cannot return after a later restart. Reopening that session restores the remaining rows **paused**: nothing sends until you press `Enter` on the empty composer. A `/reload` runtime swap still carries committed rows and pause state through a short in-process handoff. Edit drafts stay session-local and never persist; ordinary `/new` and forks start clean, while queued `/new` intentionally transfers its committed tail.
 
@@ -185,7 +187,7 @@ Pi’s public `sendUserMessage` API is fire-and-forget. The extension restores s
 
 Queued `/model` uses Pi's awaited model API. Queued `/new` runs through an internal extension-command adapter because `newSession()` is intentionally available only in command contexts. Queued `/fabric prewalk` uses Pi Fabric's versioned host-local request/ack protocol. `/reload` remains the one supported control exposed only through the TUI editor's `void` submit callback, so Pi cannot acknowledge or reject that submit back to the extension.
 
-If an `all`-mode lane stays pinned until the agent settles, saving from idle starts the new run with the lane head, then delivers the remaining rows in FIFO order at the next native boundary. The public API has no atomic idle-to-native-queue batch operation, so this restart cannot be one native batch. Draining sidesteps that limit by composing its combined message client-side, so one send carries every row.
+If an `all`-mode head segment stays pinned until the agent settles, saving from idle starts the new run with the timeline head, then delivers the remaining rows in that segment at the next native boundary. The public API has no atomic idle-to-native-queue batch operation, so this restart cannot be one native batch. Draining sidesteps that limit by composing its combined message client-side, so one send carries every row.
 
 ## Resume persistence
 

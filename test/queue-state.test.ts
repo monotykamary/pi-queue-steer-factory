@@ -18,7 +18,7 @@ import queueSteerExtension, { NATIVE_FLUSH_GRACE_MS } from "../index.ts";
 import { isQueueSnapshot, latestQueueSnapshot, queueSnapshotOf, QUEUE_SNAPSHOT_TYPE } from "../queue-persistence.ts";
 import { DeliveryQueue, isQueueableSubmission, parseQueuedCommand, QueueEditSession, type QueueLane } from "../queue-state.ts";
 
-test("keeps steering and follow-ups in independent FIFOs", () => {
+test("preserves enqueue order across lanes while each lane stays FIFO", () => {
 	const queue = new DeliveryQueue<string>();
 	queue.enqueue("followUp", "later one", ["one.png"]);
 	queue.enqueue("steer", "steer one");
@@ -28,14 +28,16 @@ test("keeps steering and follow-ups in independent FIFOs", () => {
 	assert.deepEqual(
 		queue.snapshot().map((item) => [item.lane, item.text]),
 		[
-			["steer", "steer one"],
-			["steer", "steer two"],
 			["followUp", "later one"],
+			["steer", "steer one"],
 			["followUp", "later two"],
+			["steer", "steer two"],
 		],
 	);
-	assert.equal(queue.shift("steer")?.text, "steer one");
-	assert.equal(queue.shift("followUp")?.text, "later one");
+	assert.deepEqual(queue.laneSnapshot("steer").map((item) => item.text), ["steer one", "steer two"]);
+	assert.deepEqual(queue.laneSnapshot("followUp").map((item) => item.text), ["later one", "later two"]);
+	assert.equal(queue.shift()?.text, "later one");
+	assert.equal(queue.shift()?.text, "steer one");
 });
 
 test("selects the globally most recent item before navigating spatially", () => {
@@ -46,9 +48,9 @@ test("selects the globally most recent item before navigating spatially", () => 
 
 	assert.equal(queue.mostRecentId(), latestSteer.id);
 	assert.equal(queue.previousId(), latestSteer.id);
-	assert.equal(queue.previousId(latestSteer.id), firstSteer.id);
-	assert.equal(queue.nextId(latestSteer.id), latestFollowUp.id);
-	assert.equal(queue.nextId(latestFollowUp.id), firstSteer.id);
+	assert.equal(queue.previousId(latestSteer.id), latestFollowUp.id);
+	assert.equal(queue.nextId(latestSteer.id), firstSteer.id);
+	assert.equal(queue.nextId(latestFollowUp.id), latestSteer.id);
 });
 
 test("edits a row without changing its stable lane position", () => {
@@ -71,9 +73,10 @@ test("restores failed batches at the front in their original order", () => {
 	assert.deepEqual(queue.laneSnapshot("followUp").map((item) => item.text), ["first", "second", "third"]);
 });
 
-test("restores queue snapshots with stable IDs, recency, images, and collision-free counters", () => {
+test("restores interleaved snapshots with stable IDs, recency, images, and collision-free counters", () => {
 	const original = new DeliveryQueue<string>();
-	const first = original.enqueue("steer", "first", ["one.png"]);
+	const first = original.enqueue("followUp", "first", ["one.png"]);
+	original.enqueue("steer", "inside first");
 	const mostRecent = original.enqueue("followUp", "second", ["two.png"]);
 	const snapshot = original.snapshot();
 
@@ -82,8 +85,8 @@ test("restores queue snapshots with stable IDs, recency, images, and collision-f
 	assert.deepEqual(restored.snapshot(), snapshot);
 	assert.equal(restored.mostRecentId(), mostRecent.id);
 	assert.equal(restored.get(first.id)?.images[0], "one.png");
-	const next = restored.enqueue("steer", "third");
-	assert.equal(next.id, "steer-3");
+	const next = restored.enqueue("steer", "inside second");
+	assert.equal(next.id, "steer-4");
 	assert.ok(next.sequence > mostRecent.sequence);
 });
 
@@ -153,6 +156,19 @@ test("lane toggles re-lane rows to the destination tail on commit only", () => {
 	assert.equal(queue.laneLength("followUp"), 0);
 });
 
+test("lane toggles join the destination visual tail without moving later rows", () => {
+	const queue = new DeliveryQueue();
+	const steer = queue.enqueue("steer", "steer one");
+	const later = queue.enqueue("followUp", "later one");
+	const promote = queue.enqueue("followUp", "promote me");
+
+	const edit = new QueueEditSession(promote, "");
+	edit.toggleLane(promote.id);
+	edit.commit(queue, "promote me");
+
+	assert.deepEqual(queue.snapshot().map((item) => item.id), [steer.id, promote.id, later.id]);
+});
+
 test("toggling a lane twice leaves the row untouched at commit", () => {
 	const queue = new DeliveryQueue();
 	const first = queue.enqueue("steer", "first");
@@ -174,6 +190,7 @@ test("swaps a row with its lane neighbour without touching the other lane", () =
 	assert.equal(queue.moveInLane(secondSteer.id, -1), true);
 	assert.deepEqual(queue.laneSnapshot("steer").map((item) => item.id), [secondSteer.id, firstSteer.id]);
 	assert.deepEqual(queue.laneSnapshot("followUp").map((item) => item.id), [followUp.id]);
+	assert.deepEqual(queue.snapshot().map((item) => item.id), [secondSteer.id, followUp.id, firstSteer.id]);
 	assert.equal(queue.get(secondSteer.id)?.lane, "steer");
 	assert.equal(queue.get(secondSteer.id)?.sequence, secondSteer.sequence);
 });
@@ -486,20 +503,22 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 	assert.fail("Timed out waiting for condition");
 }
 
-test("renders stacked lane boxes with steering above follow-ups", async () => {
+test("renders lane segments in global queue order", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "write the README");
-	await enqueue(harness, "steer", "check the API first");
+	await enqueue(harness, "steer", "check the API next");
+	await enqueue(harness, "followUp", "then update the tests");
 
 	const rendered = renderWidget(harness);
 	const lines = rendered.split("\n");
-	assert.equal(lines.filter((line) => line.startsWith("┌")).length, 2);
-	assert.ok(rendered.indexOf("steering queue (1)") < rendered.indexOf("check the API first"));
-	assert.ok(rendered.indexOf("check the API first") < rendered.indexOf("follow-ups (1)"));
-	assert.ok(rendered.indexOf("follow-ups (1)") < rendered.indexOf("write the README"));
-	assert.match(rendered, /next turn/);
+	assert.equal(lines.filter((line) => line.startsWith("┌")).length, 3);
+	assert.ok(rendered.indexOf("write the README") < rendered.indexOf("check the API next"));
+	assert.ok(rendered.indexOf("check the API next") < rendered.indexOf("then update the tests"));
+	assert.equal(rendered.match(/follow-ups \(1\)/g)?.length, 2);
+	assert.match(rendered, /next turn when reached/);
 	assert.match(rendered, /after this run/);
+	assert.match(rendered, /waits for earlier rows/);
 });
 
 test("colors each lane's full box instead of only its row label", async () => {
@@ -574,6 +593,46 @@ test("injects follow-ups through Pi's native continuation queue at agent_end", a
 	await harness.emit("agent_end");
 	assert.deepEqual(harness.sent[0], { content: "later one", options: { deliverAs: "followUp" } });
 	assert.match(renderWidget(harness), /later two/);
+});
+
+test("dispatches follow-up then steering then follow-up in timeline order", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "queued turn one");
+	await enqueue(harness, "steer", "steer inside turn one");
+	await enqueue(harness, "followUp", "queued turn two");
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.sent.length, 0, "later steering must not overtake the follow-up head");
+	await harness.emit("agent_end");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	await harness.emit("agent_end");
+
+	assert.deepEqual(harness.sent, [
+		{ content: "queued turn one", options: { deliverAs: "followUp" } },
+		{ content: "steer inside turn one", options: { deliverAs: "steer" } },
+		{ content: "queued turn two", options: { deliverAs: "followUp" } },
+	]);
+});
+
+test("dispatches steering then follow-up then steering in timeline order", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "steer current run");
+	await enqueue(harness, "followUp", "queued next turn");
+	await enqueue(harness, "steer", "steer inside next turn");
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+	assert.equal(harness.sent.length, 1, "later steering must not overtake the follow-up head");
+	await harness.emit("agent_end");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+
+	assert.deepEqual(harness.sent, [
+		{ content: "steer current run", options: { deliverAs: "steer" } },
+		{ content: "queued next turn", options: { deliverAs: "followUp" } },
+		{ content: "steer inside next turn", options: { deliverAs: "steer" } },
+	]);
 });
 
 test("restores only the unsent tail after a synchronous all-mode batch failure", async () => {
@@ -676,6 +735,78 @@ test("honours Pi all-mode settings and pins the whole edited lane", async () => 
 		await enqueue(followUps, "followUp", "later two");
 		await followUps.emit("agent_end");
 		assert.deepEqual(followUps.sent.map((item) => item.content), ["later one", "later two"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("all mode batches only the contiguous head lane segment", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-steer-all-interleaved-"));
+	mkdirSync(join(cwd, ".pi"));
+	writeFileSync(
+		join(cwd, ".pi", "settings.json"),
+		JSON.stringify({ steeringMode: "all", followUpMode: "all" }),
+	);
+	try {
+		const harness = createHarness({ cwd, projectTrusted: true });
+		await harness.emit("session_start");
+		await enqueue(harness, "followUp", "follow-up one");
+		await enqueue(harness, "followUp", "follow-up two");
+		await enqueue(harness, "steer", "steer inside");
+		await enqueue(harness, "followUp", "follow-up three");
+
+		await harness.emit("agent_end");
+		assert.deepEqual(harness.sent.map((item) => item.content), ["follow-up one", "follow-up two"]);
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+		await harness.emit("agent_end");
+		assert.deepEqual(harness.sent.map((item) => item.content), [
+			"follow-up one",
+			"follow-up two",
+			"steer inside",
+			"follow-up three",
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("all mode does not let an edit beyond a command barrier pin the head batch", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-steer-all-edit-command-"));
+	mkdirSync(join(cwd, ".pi"));
+	writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ followUpMode: "all" }));
+	try {
+		const harness = createHarness({ cwd, projectTrusted: true });
+		await harness.emit("session_start");
+		await enqueue(harness, "followUp", "head message");
+		await enqueue(harness, "followUp", "/compact barrier");
+		await enqueue(harness, "followUp", "later message");
+
+		harness.editor.handleInput("alt-up");
+		harness.editor.handleInput("alt-up");
+		await harness.emit("agent_end");
+		assert.deepEqual(harness.sent.map((item) => item.content), ["head message"]);
+		assert.equal(harness.editor.getText(), "/compact barrier");
+		assert.match(renderWidget(harness), /held while editing/);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("all mode does not let an edit beyond a lane switch pin the head segment", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-steer-all-edit-segment-"));
+	mkdirSync(join(cwd, ".pi"));
+	writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ steeringMode: "all" }));
+	try {
+		const harness = createHarness({ cwd, projectTrusted: true });
+		await harness.emit("session_start");
+		await enqueue(harness, "steer", "head steer");
+		await enqueue(harness, "followUp", "lane boundary");
+		await enqueue(harness, "steer", "later steer being edited");
+
+		harness.editor.handleInput("alt-up");
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+		assert.deepEqual(harness.sent.map((item) => item.content), ["head steer"]);
+		assert.equal(harness.editor.getText(), "later steer being edited");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
@@ -1095,15 +1226,18 @@ test("expands queued prompt templates and short Agent Skill commands at delivery
 		await enqueue(harness, "steer", "/bro make this clearer");
 
 		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
-		assert.match(String(harness.sent[0]?.content), /<skill name="bro"/);
-		assert.match(String(harness.sent[0]?.content), /make this clearer$/);
+		assert.equal(harness.sent.length, 0);
 
-		harness.clearPending();
 		await harness.emit("agent_end");
-		assert.deepEqual(harness.sent[1]?.content, [
+		assert.deepEqual(harness.sent[0]?.content, [
 			{ type: "text", text: "Review this and simplify it." },
 			image,
 		]);
+
+		harness.clearPending();
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+		assert.match(String(harness.sent[1]?.content), /<skill name="bro"/);
+		assert.match(String(harness.sent[1]?.content), /make this clearer$/);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -1392,17 +1526,20 @@ test("keeps reload runnable when compact aborts a preflight prompt", async () =>
 	assert.deepEqual(harness.submitted, ["/reload"]);
 });
 
-test("owns busy manual compaction so its abort does not pause queued rows", async () => {
+test("runs a busy manual compaction after an earlier follow-up without pausing its tail", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
-	await enqueue(harness, "followUp", "continue after compact");
+	await enqueue(harness, "followUp", "before compact");
 
-	// Busy: a typed /compact parks as a steer row instead of cutting the live
-	// turn; compaction starts at the next turn boundary.
+	// The steered control stays immediately after the earlier queued turn.
 	harness.editor.onSubmit?.("/compact preserve the queue");
+	await enqueue(harness, "followUp", "continue after compact");
 	assert.equal(harness.compactCalls.length, 0);
-	assert.match(renderWidget(harness), /\/compact/);
-	assert.match(renderWidget(harness), /continue after compact/);
+
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.compactCalls.length, 0);
+	await harness.emit("agent_end");
+	assert.equal(harness.sent[0]?.content, "before compact");
 
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.equal(harness.compactCalls[0]?.customInstructions, "preserve the queue");
@@ -1418,30 +1555,34 @@ test("owns busy manual compaction so its abort does not pause queued rows", asyn
 		tokensBefore: 100,
 		estimatedTokensAfter: 20,
 	});
-	await waitFor(() => harness.sent.length === 1);
-	assert.equal(harness.sent[0]?.content, "continue after compact");
+	await waitFor(() => harness.sent.length === 2);
+	assert.equal(harness.sent[1]?.content, "continue after compact");
 });
 
-test("parks a mid-run Enter on /new as a steer row until the turn boundary", async () => {
+test("parks a mid-run Enter on /new behind an earlier follow-up", async () => {
 	const harness = createHarness({ newSession: async () => ({ cancelled: true }) });
 	await harness.emit("session_start");
-	await enqueue(harness, "followUp", "still here");
+	await enqueue(harness, "followUp", "before new");
 
-	// Busy: a typed /new parks as a steer row instead of replacing the session
-	// over live tool work; the handoff runs at the next turn boundary.
+	// Busy: a typed /new parks as steering after the queued turn instead of
+	// replacing the session over live tool work.
 	harness.editor.onSubmit?.("/new");
+	await enqueue(harness, "followUp", "still here");
 	assert.equal(harness.newSessionCalls, 0);
-	assert.match(renderWidget(harness), /\/new/);
-	assert.match(renderWidget(harness), /still here/);
 
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.newSessionCalls, 0);
+	await harness.emit("agent_end");
+	assert.equal(harness.sent[0]?.content, "before new");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	await waitFor(() => harness.newSessionCalls === 1);
 
 	// A cancelled handoff restores and pauses the row, mid-run or not.
 	await waitFor(() => harness.notifications.some(({ message }) => message.includes("new session cancelled")));
-	assert.match(renderWidget(harness), /\/new/);
-	assert.match(renderWidget(harness), /still here/);
-	assert.match(renderWidget(harness), /paused/);
+	const rendered = renderWidget(harness);
+	assert.match(rendered, /\/new/);
+	assert.match(rendered, /still here/);
+	assert.match(rendered, /paused/);
 });
 
 test("executes a steered /compact at the next turn boundary and resumes the tail", async () => {
@@ -2175,7 +2316,7 @@ test("drain command steers every queued message into a live run in timeline orde
 
 	await harness.runCommand("queue-drain");
 	assert.deepEqual(harness.sent, [{
-		content: "steer one\nsteer two\nlater one\nlater two",
+		content: "later one\nsteer one\nsteer two\nlater two",
 		options: { deliverAs: "steer" },
 	}]);
 	const rendered = renderWidget(harness);
@@ -2247,22 +2388,22 @@ test("a drain merges attachments from every row into the combined message", asyn
 	}]);
 });
 
-test("a send failure during a drain restores every row and pauses", async () => {
+test("a send failure during a drain restores every interleaved row and pauses", async () => {
 	const harness = createHarness({ sendFailureAt: 1 });
 	await harness.emit("session_start");
 	harness.setIdle(true);
-	for (const text of ["one", "two", "three"]) {
-		harness.editor.setText(text);
-		harness.editor.handleInput("alt-enter");
-	}
+	await enqueue(harness, "followUp", "one");
+	await enqueue(harness, "steer", "two");
+	await enqueue(harness, "followUp", "/compact later");
+	await enqueue(harness, "steer", "three");
 
 	await harness.runCommand("queue-drain");
 	assert.equal(harness.sent.length, 0);
 	assert.equal(harness.appendedEntries.length, 0);
 	const rendered = renderWidget(harness);
-	assert.match(rendered, /one/);
-	assert.match(rendered, /two/);
-	assert.match(rendered, /three/);
+	assert.ok(rendered.indexOf("one") < rendered.indexOf("two"));
+	assert.ok(rendered.indexOf("two") < rendered.indexOf("/compact later"));
+	assert.ok(rendered.indexOf("/compact later") < rendered.indexOf("three"));
 	assert.match(rendered, /paused/);
 	assert.match(
 		harness.notifications.at(-1)?.message ?? "",

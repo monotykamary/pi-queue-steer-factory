@@ -65,11 +65,22 @@ test("shiftWhile stops at the first rejected row and preserves FIFO", () => {
 	assert.deepEqual(
 		queue.snapshot().map((item) => [item.lane, item.text]),
 		[
-			["steer", "steer one"],
 			["followUp", "/compact"],
 			["followUp", "three"],
+			["steer", "steer one"],
 		],
 	);
+});
+
+test("shiftWhile stops at an interleaved lane boundary", () => {
+	const queue = new DeliveryQueue<string>();
+	queue.enqueue("followUp", "one");
+	queue.enqueue("steer", "inside one");
+	queue.enqueue("followUp", "two");
+
+	const isMessage = (item: QueuedMessage<string>) => parseQueuedCommand(item.text) === undefined;
+	assert.deepEqual(queue.shiftWhile("followUp", isMessage).map((item) => item.text), ["one"]);
+	assert.deepEqual(queue.snapshot().map((item) => item.text), ["inside one", "two"]);
 });
 
 test("shiftWhile with a command head takes nothing", () => {

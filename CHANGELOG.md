@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Steering and follow-up rows now share one global FIFO timeline instead of being sorted into lane-priority blocks. Alternating rows stay visible as alternating blue/yellow segments and dispatch strictly from the head, enabling a steer immediately inside a queued follow-up run and a follow-up immediately after steering without either lane overtaking the other. Pi's `all` mode batches only the contiguous dispatchable same-lane head segment, while persistence, drains, row holds, command rows, and failed-send restoration preserve the exact mixed order.
+
 ## 0.13.5 - 2026-09-04
 
 ### Fixed

@@ -230,6 +230,43 @@ async function seedSession(harness: IntegrationHarness): Promise<void> {
 	await harness.session.prompt("seed two");
 }
 
+test("real AgentSession interleaves follow-up and steering rows in enqueue order", async () => {
+	const harness = await createIntegrationHarness();
+	try {
+		await seedSession(harness);
+		const active = gatedResponse("active response");
+		harness.faux.setResponses([
+			active.step,
+			fauxAssistantMessage("first queued turn response"),
+			fauxAssistantMessage("interleaved steering response"),
+			fauxAssistantMessage("second queued turn response"),
+		]);
+		const activeStarted = nextAgentStart(harness.session);
+		const activePrompt = harness.session.prompt("active prompt");
+		await within(activeStarted, () => "interleaving agent did not start");
+
+		await harness.session.prompt("queued turn one", { streamingBehavior: "followUp" });
+		await harness.session.prompt("steer inside turn one", { streamingBehavior: "steer" });
+		await harness.session.prompt("queued turn two", { streamingBehavior: "followUp" });
+		const completed = nextAgentRunForUser(harness.session, "queued turn two");
+
+		active.release();
+		await activePrompt;
+		await within(completed, () => userTexts(harness.session).join(" -> "));
+
+		assert.deepEqual(userTexts(harness.session).slice(2), [
+			"active prompt",
+			"queued turn one",
+			"steer inside turn one",
+			"queued turn two",
+		]);
+		assert.equal(harness.session.getSteeringMessages().length, 0);
+		assert.equal(harness.session.getFollowUpMessages().length, 0);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
 test("real AgentSession runs a queued manual compaction before the following row", async () => {
 	const harness = await createIntegrationHarness();
 	try {

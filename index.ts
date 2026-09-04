@@ -139,6 +139,8 @@ interface TimelineItem extends QueuedMessage<ImageContent> {
 	removed: boolean;
 	movedLane: boolean;
 	held: boolean;
+	dispatchHead: boolean;
+	dispatchBatch: boolean;
 	/** Effective row-level dispatch hold (draft value when the edit session touched it). */
 	rowPaused: boolean;
 	/** True when the current edit session drafted a pause change that differs from the row's committed hold. */
@@ -188,9 +190,17 @@ class QueueTimelineWidget implements Component {
 			return [truncateToWidth(summary, width, "")];
 		}
 
+		const segments: { lane: QueueLane; items: TimelineItem[] }[] = [];
+		for (const item of this.items) {
+			const segment = segments.at(-1);
+			if (segment?.lane === item.lane) segment.items.push(item);
+			else segments.push({ lane: item.lane, items: [item] });
+		}
+
 		const lines: string[] = [];
-		if (steering.length > 0) this.renderLaneBox(lines, "steer", steering, width);
-		if (followUps.length > 0) this.renderLaneBox(lines, "followUp", followUps, width);
+		for (const segment of segments) {
+			this.renderLaneBox(lines, segment.lane, segment.items, width);
+		}
 		return lines;
 	}
 
@@ -203,8 +213,11 @@ class QueueTimelineWidget implements Component {
 		const color = laneColor(lane);
 		const border = (text: string) => this.theme.fg(color, text);
 		const laneHeld = items.some((item) => item.held);
-		const headPaused = items[0]?.rowPaused ?? false;
-		const stage = lane === "steer" ? "next turn" : "after this run";
+		const segmentAtHead = items.some((item) => item.dispatchHead);
+		const headPaused = items.find((item) => item.dispatchHead)?.rowPaused ?? false;
+		const stage = lane === "steer"
+			? segmentAtHead ? "next turn" : "next turn when reached"
+			: segmentAtHead ? "after this run" : "after run when reached";
 		const state = this.paused
 			? "paused"
 			: headPaused
@@ -220,7 +233,7 @@ class QueueTimelineWidget implements Component {
 		lines.push(border(`┌${title}${topFill}┐`));
 		const cellWidth = width - 4;
 
-		for (const item of items) this.renderItem(lines, item, items, cellWidth, border);
+		for (const item of items) this.renderItem(lines, item, cellWidth, border);
 
 		const dequeue = keyText("app.message.dequeue");
 		const followUp = keyText("app.message.followUp");
@@ -235,9 +248,11 @@ class QueueTimelineWidget implements Component {
 				? this.idle
 					? `${followUp} queue · ${submit} send · ${dequeue} edit`
 					: `${submit} resume · ${dequeue} edit · ${interrupt} keep paused`
-				: lane === "steer"
-					? `${submit} steer/send next · ${dequeue} edit`
-					: `${followUp} add follow-up · ${submit} send next · ${dequeue} edit`;
+				: !segmentAtHead
+					? `waits for earlier rows · ${dequeue} edit`
+					: lane === "steer"
+						? `${submit} steer/send next · ${dequeue} edit`
+						: `${followUp} add follow-up · ${submit} send next · ${dequeue} edit`;
 		lines.push(`${border("│")} ${fitCell(this.theme.fg("dim", help), cellWidth)} ${border("│")}`);
 		lines.push(border(`└${"─".repeat(width - 2)}┘`));
 	}
@@ -245,13 +260,12 @@ class QueueTimelineWidget implements Component {
 	private renderItem(
 		lines: string[],
 		item: TimelineItem,
-		laneItems: TimelineItem[],
 		cellWidth: number,
 		border: (text: string) => string,
 	): void {
 		const selected = item.id === this.editingId;
-		const head = laneItems[0]?.id === item.id;
-		const armed = this.modes[item.lane] === "all" || head;
+		const head = item.dispatchHead;
+		const armed = item.dispatchBatch && (this.modes[item.lane] === "all" || head);
 		const color = laneColor(item.lane);
 
 		if (!selected) {
@@ -538,12 +552,24 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		);
 	};
 
+	const headDeliveryBatch = (timeline: readonly QueuedMessage<ImageContent>[]): QueuedMessage<ImageContent>[] => {
+		const head = timeline[0];
+		if (!head) return [];
+		const batch = [head];
+		if (head.paused || itemCommand(head)) return batch;
+		for (const item of timeline.slice(1)) {
+			if (item.lane !== head.lane || item.paused || itemCommand(item)) break;
+			batch.push(item);
+		}
+		return batch;
+	};
+
 	const laneIsHeld = (lane: QueueLane): boolean => {
 		if (!editSession) return false;
-		const mode = queueModes()[lane];
-		if (mode === "all") return editSession.touchesLane(queue, lane);
-		const head = queue.peek(lane);
-		return !!head && editSession.touches(head.id);
+		const batch = headDeliveryBatch(queue.snapshot());
+		if (batch[0]?.lane !== lane) return false;
+		if (queueModes()[lane] === "one-at-a-time") return editSession.touches(batch[0].id);
+		return batch.some((item) => editSession?.touches(item.id));
 	};
 
 	/**
@@ -567,12 +593,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	};
 
 	/**
-	 * Queue rows with session drafts applied, in visual timeline order.
+	 * Queue rows with session drafts applied, in global delivery order.
 	 *
-	 * Rows keep their FIFO position; rows re-laned in the current session
-	 * preview at their destination lane's tail, matching where commit puts
-	 * them. Held flags follow dispatch truth: they reflect each row's
-	 * *committed* lane, so an uncommitted lane draft never changes delivery.
+	 * Rows re-laned in the current session preview at their destination lane's
+	 * visual tail, matching the commit algorithm. Held flags follow dispatch
+	 * truth: an uncommitted lane draft never changes delivery.
 	 */
 	const timelineItems = (): TimelineItem[] => {
 		const modes = queueModes();
@@ -580,11 +605,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			steer: laneIsHeld("steer"),
 			followUp: laneIsHeld("followUp"),
 		};
-		const heads: Record<QueueLane, string | undefined> = {
-			steer: queue.peek("steer")?.id,
-			followUp: queue.peek("followUp")?.id,
-		};
-		const decorated = queue.snapshot().map((item): TimelineItem => {
+		const committed = queue.snapshot();
+		const headId = committed[0]?.id;
+		const headBatchIds = new Set(headDeliveryBatch(committed).map((item) => item.id));
+		const decorated = committed.map((item): TimelineItem => {
 			const lane = editSession?.laneFor(item.id) ?? item.lane;
 			const text = editSession?.textFor(item.id) ?? item.text;
 			const images = editSession?.imagesFor(item.id) ?? item.images;
@@ -598,16 +622,28 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				rowPaused: editSession?.pausedFor(item.id) ?? (item.paused ?? false),
 				rowPauseDrafted: editSession?.pausedFor(item.id) !== undefined
 					&& editSession.pausedFor(item.id) !== (item.paused ?? false),
-				held: heldLane[item.lane] && (modes[item.lane] === "all" || heads[item.lane] === item.id),
+				held: heldLane[item.lane] && (modes[item.lane] === "all" ? headBatchIds.has(item.id) : headId === item.id),
+				dispatchHead: headId === item.id,
+				dispatchBatch: headBatchIds.has(item.id),
 				command: itemCommand({ text, images }),
 			};
 		});
-		return [
-			...decorated.filter((item) => item.lane === "steer" && !item.movedLane),
-			...decorated.filter((item) => item.lane === "steer" && item.movedLane),
-			...decorated.filter((item) => item.lane === "followUp" && !item.movedLane),
-			...decorated.filter((item) => item.lane === "followUp" && item.movedLane),
-		];
+		const ordered = [...decorated];
+		const committedLanes = new Map(committed.map((item) => [item.id, item.lane]));
+		for (const original of committed) {
+			const fromIndex = ordered.findIndex((item) => item.id === original.id);
+			const item = ordered[fromIndex];
+			if (!item?.movedLane) continue;
+			ordered.splice(fromIndex, 1);
+			committedLanes.set(item.id, item.lane);
+			let destinationTail = -1;
+			for (const [index, candidate] of ordered.entries()) {
+				if (committedLanes.get(candidate.id) === item.lane) destinationTail = index;
+			}
+			if (destinationTail === -1) ordered.push(item);
+			else ordered.splice(destinationTail + 1, 0, item);
+		}
+		return ordered;
 	};
 
 	// Publish the queue snapshot on every render (the choke point all queue,
@@ -672,15 +708,15 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// row itself, and follow-up command rows wait for agent_settled. A command
 	// row stops the batch (FIFO): rows behind it dispatch after the control.
 	const takeLaneBatch = (lane: QueueLane): QueuedMessage<ImageContent>[] => {
-		if (paused || blockingActivity || queue.laneLength(lane) === 0 || laneIsHeld(lane)) return [];
-		// A row-level pause is a dispatch barrier: the batch stops at the first
-		// paused row and nothing behind it jumps ahead of it.
+		const head = queue.peek();
+		if (paused || blockingActivity || head?.lane !== lane || laneIsHeld(lane)) return [];
+		// A lane switch, command, or row-level pause is a dispatch barrier: the
+		// batch stops there and nothing later in the timeline jumps ahead.
 		const isMessage = (item: QueuedMessage<ImageContent>) =>
 			itemCommand(item) === undefined && !item.paused;
 		if (queueModes()[lane] === "all") return queue.shiftWhile(lane, isMessage);
-		const head = queue.peek(lane);
-		if (!head || !isMessage(head)) return [];
-		const item = queue.shift(lane);
+		if (!isMessage(head)) return [];
+		const item = queue.shift();
 		return item ? [item] : [];
 	};
 
@@ -729,8 +765,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		// dispatches at the next turn boundary, so a steered command executes
 		// mid-run exactly as if typed there. Follow-up command rows keep their
 		// settle boundary and run from dispatchFromIdle.
-		const head = queue.peek(lane);
-		if (lane === "steer" && head && itemCommand(head)) {
+		const head = queue.peek();
+		if (head?.lane !== lane) {
+			renderQueue(ctx);
+			return false;
+		}
+		if (lane === "steer" && itemCommand(head)) {
 			if (paused || blockingActivity || head.paused || laneIsHeld(lane)) {
 				renderQueue(ctx);
 				return false;
@@ -912,11 +952,11 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return true;
 	};
 
-	// Execute the command row at the lane head: at idle from dispatchFromIdle,
-	// or mid-run when a steered command reaches a turn boundary.
+	// Execute a command at the global timeline head: at idle from
+	// dispatchFromIdle, or mid-run when an eligible steer reaches a boundary.
 	const executeCommandRow = (ctx: ExtensionContext, lane: QueueLane): boolean => {
-		const next = queue.peek(lane);
-		if (!next) return false;
+		const next = queue.peek();
+		if (!next || next.lane !== lane) return false;
 		const command = itemCommand(next);
 		if (!command) return false;
 		if (command.kind === "model") return executeModelRow(ctx, next, command);
@@ -947,7 +987,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("Could not run queued /reload; queue paused because no interactive submit handler is available", "error");
 			return false;
 		}
-		queue.shift(lane);
+		queue.shift();
 		resumeQueue();
 		renderQueue(ctx);
 		if (command.kind === "compact") {
@@ -971,8 +1011,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	};
 
 	const sendHeadMessage = (ctx: ExtensionContext, lane: QueueLane, deliverAs?: QueueLane): boolean => {
-		const head = queue.peek(lane);
-		if (!head) return false;
+		const head = queue.peek();
+		if (!head || head.lane !== lane) return false;
 		let prepared: QueuedMessage<ImageContent>;
 		try {
 			prepared = { ...head, text: expandQueuedInput(head.text, pi.getCommands()) };
@@ -980,7 +1020,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			pauseAfterPreparationFailure(ctx, lane, error);
 			return false;
 		}
-		queue.shift(lane);
+		queue.shift();
 		resumeQueue();
 		renderQueue(ctx);
 		try {
@@ -1004,16 +1044,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			renderQueue(ctx);
 			return false;
 		}
-		const lane: QueueLane | undefined = queue.laneLength("steer") > 0
-			? "steer"
-			: queue.laneLength("followUp") > 0
-				? "followUp"
-				: undefined;
+		const lane = queue.peek()?.lane;
 		if (!lane || laneIsHeld(lane)) {
 			renderQueue(ctx);
 			return false;
 		}
-		const head = queue.peek(lane);
+		const head = queue.peek();
 		// A paused head row holds dispatch here; nothing behind it jumps ahead.
 		if (head?.paused) {
 			renderQueue(ctx);
@@ -1116,8 +1152,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	};
 
 	const sendFollowUpNow = (ctx: ExtensionContext): boolean => {
-		const head = queue.peek("followUp");
-		if (!head) return false;
+		const head = queue.peek();
+		if (!head || head.lane !== "followUp") return false;
 		if (head.paused) {
 			ctx.ui.notify(`The next follow-up row is paused (${PAUSE_ROW_KEY} on it resumes delivery)`, "info");
 			return false;
@@ -1150,8 +1186,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return;
 		}
 		// Paused rows are deliberate holds: a drain skips them and leaves them parked.
-		const heldBack = queue.snapshot().filter((item) => item.paused && !itemCommand(item)).length;
-		const messages = queue.snapshot().filter((item) => !itemCommand(item) && !item.paused);
+		const original = queue.snapshot();
+		const heldBack = original.filter((item) => item.paused && !itemCommand(item)).length;
+		const messages = original.filter((item) => !itemCommand(item) && !item.paused);
 		if (messages.length === 0) {
 			ctx.ui.notify(
 				queue.length === 0
@@ -1193,7 +1230,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		try {
 			pi.sendUserMessage(mergedDrainContent(prepared), idle ? undefined : { deliverAs: "steer" });
 		} catch (error) {
-			queue.prependMany(messages);
+			queue.restore(original);
 			pauseQueue();
 			renderQueue(ctx);
 			ctx.ui.notify(
@@ -1442,9 +1479,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						resumeQueue();
 						if (ctx.isIdle()) {
 							if (dispatchFromIdle(ctx)) return;
-							const nextLane: QueueLane = queue.laneLength("steer") > 0 ? "steer" : "followUp";
-							const head = queue.peek(nextLane);
-							if (head?.paused) {
+							const nextLane = queue.peek()?.lane;
+							const head = queue.peek();
+							if (head?.paused && nextLane) {
 								renderQueue(ctx);
 								ctx.ui.notify(`Queue resumed — the next ${laneLabel(nextLane)} row is paused (${PAUSE_ROW_KEY} on it resumes)`, "info");
 								return;
@@ -1453,7 +1490,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 						renderQueue(ctx);
 						return;
 					}
-					if (queue.laneLength("followUp") > 0) {
+					if (queue.peek()?.lane === "followUp") {
 						sendFollowUpNow(ctx);
 						return;
 					}
@@ -1850,11 +1887,8 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			return;
 		}
 		if (paused) return;
-		if (queue.laneLength("steer") > 0) {
-			await dispatchLaneAtBoundary(ctx, "steer");
-			return;
-		}
-		await dispatchLaneAtBoundary(ctx, "followUp");
+		const head = queue.peek();
+		if (head) await dispatchLaneAtBoundary(ctx, head.lane);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {

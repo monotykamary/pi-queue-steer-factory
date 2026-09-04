@@ -44,8 +44,8 @@ export function isQueueSnapshot(value: unknown): value is QueueSnapshot {
 }
 
 /**
- * Serialize committed rows into the persisted shape. Callers pass queue
- * snapshots only; unsaved edit drafts never cross sessions.
+ * Serialize committed rows into the persisted shape in global timeline order.
+ * Callers pass queue snapshots only; unsaved edit drafts never cross sessions.
  */
 export function queueSnapshotOf(
 	rows: readonly QueuedMessage<ImageContent>[],

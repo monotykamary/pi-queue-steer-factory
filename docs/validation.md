@@ -23,10 +23,9 @@ npm update --ignore-scripts \
 npm run ci
 ```
 
-The suite covers queue/edit invariants, command classification, images, one-at-a-time and all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
+The suite covers global steering/follow-up interleaving, queue/edit invariants, command classification, images, one-at-a-time and barrier-bounded all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
 
-Latest result with Pi 0.84.3: 149 tests passed.
-
+Latest result with Pi 0.85.0: 183 tests passed.
 
 ## Factory control pipeline
 
@@ -50,7 +49,7 @@ One empty-composer `Enter` replaced the session, selected the model, armed prewa
 
 ## Real TUI evidence
 
-`test/tui-evidence.sh` starts the real Pi 0.84.1 TUI under tmux with a deterministic faux provider. It uses actual terminal key sequences, public compaction lifecycle events, public provider registration, actual runtime reloads, and Pi's real native compaction queue.
+`test/tui-evidence.sh` starts the real Pi TUI under tmux with a deterministic faux provider (Pi 0.85.0 in the latest run). It uses actual terminal key sequences, public compaction lifecycle events, public provider registration, actual runtime reloads, and Pi's real native compaction queue.
 
 Run:
 
@@ -58,7 +57,7 @@ Run:
 ./test/tui-evidence.sh /tmp/pi-queue-tui-evidence
 ```
 
-The output directory contains plain terminal captures, provider-call logs, lifecycle-event logs, and runtime-initialization logs. Run it immediately before review so `summary.txt` records the exact Pi version, commit and working-tree state under test. A release evidence run should report `working tree: clean`.
+The output directory contains plain terminal captures, provider-call logs, lifecycle-event logs, and runtime-initialization logs. `interleaved-timeline.txt` must show follow-up → steering → follow-up as three ordered yellow/blue/yellow segments, while `interleaved-provider-calls.jsonl` verifies those rows reached successive provider contexts exactly once in the same order. Run the harness immediately before review so `summary.txt` records the exact Pi version, commit and working-tree state under test. A release evidence run should report `working tree: clean`.
 
 The latest complete run reported:
 

@@ -93,6 +93,12 @@ queue_follow_up() {
 	sleep 0.1
 }
 
+queue_steer() {
+	tmux -S "$SOCKET" send-keys -t "$PANE" -l -- "$1"
+	tmux -S "$SOCKET" send-keys -t "$PANE" Enter
+	sleep 0.1
+}
+
 start_pi() {
 	local context_window=$1
 	local mode=$2
@@ -215,7 +221,37 @@ if (( overflow_follow_up_count != 1 )); then
 	exit 1
 fi
 
-# Pi's all-mode setting delivers the whole visible lane in FIFO order.
+# Alternating lanes remain visible and execute in one global FIFO timeline.
+echo "Running interleaved timeline scenario"
+start_pi 100000 one-at-a-time
+send_text "BLOCK:interleave"
+wait_file "$STATE_DIR/provider-calls.jsonl" "BLOCK:interleave"
+queue_follow_up "queued turn one"
+queue_steer "steer inside turn one"
+queue_follow_up "queued turn two"
+wait_screen "queued turn two"
+capture_plain "interleaved-timeline"
+first_line=$(grep -nF "queued turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
+steer_line=$(grep -nF "steer inside turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
+second_line=$(grep -nF "queued turn two" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
+if (( first_line >= steer_line || steer_line >= second_line )); then
+	echo "Interleaved lane segments rendered out of FIFO order" >&2
+	exit 1
+fi
+touch "$STATE_DIR/gate-interleave"
+wait_screen "FAUX RESPONSE: queued turn two" 30
+cp "$STATE_DIR/provider-calls.jsonl" "$ARTIFACT_DIR/interleaved-provider-calls.jsonl"
+interleaved_context_count=$(
+	grep -Fc '"userPrefixes":["BLOCK:interleave","queued turn one","steer inside turn one","queued turn two"]' \
+		"$ARTIFACT_DIR/interleaved-provider-calls.jsonl" \
+		|| true
+)
+if (( interleaved_context_count != 1 )); then
+	echo "Interleaved rows did not reach provider context exactly once in FIFO order" >&2
+	exit 1
+fi
+
+# Pi's all-mode setting delivers the contiguous visible head segment in FIFO order.
 echo "Running all-mode scenario"
 start_pi 100000 all
 send_text "BLOCK:allmode"
@@ -248,6 +284,6 @@ fi
 	echo "manual events: $(tr '\n' ' ' < "$ARTIFACT_DIR/manual-events.jsonl")"
 	echo "overflow events: $(tr '\n' ' ' < "$ARTIFACT_DIR/overflow-events.jsonl")"
 	echo "runtime initializations across two queued reloads: $(wc -l < "$ARTIFACT_DIR/reload-runtime-inits.log")"
-	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, all-mode"
+	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, interleaved-timeline, all-mode"
 } > "$ARTIFACT_DIR/summary.txt"
 cat "$ARTIFACT_DIR/summary.txt"

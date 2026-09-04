@@ -58,17 +58,16 @@ export interface QueuedMessage<TImage = unknown> {
 	text: string;
 	images: TImage[];
 	sequence: number;
-	/** Row-level dispatch hold: a paused row stops its lane's delivery at its
+	/** Row-level dispatch hold: a paused row stops the global timeline at its
 	 *  position until resumed; rows behind it never jump ahead of it. */
 	paused?: boolean;
 }
 
 /**
- * Two independent FIFOs presented as one delivery-ordered timeline.
+ * One FIFO timeline whose rows retain their steering or follow-up delivery lane.
  *
- * Steering rows always appear before follow-ups because Pi consumes that lane
- * first. Sequence is global so queue editing can enter at the most recently
- * enqueued row even when that row sits in the middle of the visual timeline.
+ * Lane changes never reorder untouched rows, and sequence remains a separate
+ * enqueue-recency clock so editing can enter at the newest row after reorders.
  */
 export class DeliveryQueue<TImage = unknown> {
 	private items: QueuedMessage<TImage>[] = [];
@@ -90,9 +89,7 @@ export class DeliveryQueue<TImage = unknown> {
 	}
 
 	prepend(item: QueuedMessage<TImage>): void {
-		const firstInLane = this.items.findIndex((candidate) => candidate.lane === item.lane);
-		if (firstInLane === -1) this.items.push(this.copy(item));
-		else this.items.splice(firstInLane, 0, this.copy(item));
+		this.items.unshift(this.copy(item));
 	}
 
 	prependMany(items: readonly QueuedMessage<TImage>[]): void {
@@ -140,14 +137,19 @@ export class DeliveryQueue<TImage = unknown> {
 		return true;
 	}
 
-	/** Reclassify a row into the other lane, joining that lane's tail. */
+	/** Reclassify a row into the other lane, joining that lane's visual tail. */
 	moveToLaneTail(id: string, lane: QueueLane): boolean {
 		const index = this.items.findIndex((item) => item.id === id);
 		if (index === -1) return false;
 		const [item] = this.items.splice(index, 1);
 		if (!item) return false;
 		item.lane = lane;
-		this.items.push(item);
+		let destinationTail = -1;
+		for (const [candidateIndex, candidate] of this.items.entries()) {
+			if (candidate.lane === lane) destinationTail = candidateIndex;
+		}
+		if (destinationTail === -1) this.items.push(item);
+		else this.items.splice(destinationTail + 1, 0, item);
 		return true;
 	}
 
@@ -158,15 +160,13 @@ export class DeliveryQueue<TImage = unknown> {
 		return item ? this.copy(item) : undefined;
 	}
 
-	peek(lane: QueueLane): QueuedMessage<TImage> | undefined {
-		const item = this.items.find((candidate) => candidate.lane === lane);
+	peek(): QueuedMessage<TImage> | undefined {
+		const item = this.items[0];
 		return item ? this.copy(item) : undefined;
 	}
 
-	shift(lane: QueueLane): QueuedMessage<TImage> | undefined {
-		const index = this.items.findIndex((item) => item.lane === lane);
-		if (index === -1) return undefined;
-		const [item] = this.items.splice(index, 1);
+	shift(): QueuedMessage<TImage> | undefined {
+		const [item] = this.items.splice(0, 1);
 		return item ? this.copy(item) : undefined;
 	}
 
@@ -177,16 +177,16 @@ export class DeliveryQueue<TImage = unknown> {
 	}
 
 	/**
-	 * Shift rows from the lane head while the predicate accepts them, preserving
-	 * FIFO order. Stops at (and keeps) the first rejected row, so an `all`-mode
-	 * batch never crosses a command row.
+	 * Shift an adjacent run from the timeline head while the lane and predicate
+	 * match. A lane switch, command, or paused row ends an `all`-mode batch so
+	 * later rows can never jump across an interleaved delivery boundary.
 	 */
 	shiftWhile(lane: QueueLane, accept: (item: QueuedMessage<TImage>) => boolean): QueuedMessage<TImage>[] {
 		const taken: QueuedMessage<TImage>[] = [];
 		for (;;) {
-			const index = this.items.findIndex((item) => item.lane === lane);
-			if (index === -1 || !accept(this.items[index])) break;
-			const [item] = this.items.splice(index, 1);
+			const candidate = this.items[0];
+			if (!candidate || candidate.lane !== lane || !accept(candidate)) break;
+			const [item] = this.items.splice(0, 1);
 			if (!item) break;
 			taken.push(this.copy(item));
 		}
@@ -229,7 +229,7 @@ export class DeliveryQueue<TImage = unknown> {
 	}
 
 	snapshot(): QueuedMessage<TImage>[] {
-		return [...this.laneSnapshot("steer"), ...this.laneSnapshot("followUp")];
+		return this.items.map((item) => this.copy(item));
 	}
 
 	laneLength(lane: QueueLane): number {
