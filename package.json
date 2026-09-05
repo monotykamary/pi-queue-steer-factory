@@ -1,6 +1,6 @@
 {
   "name": "pi-queue-steer-factory",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "Visible steering, follow-up, and session-control queues for Pi and Pi Fabric.",
   "type": "module",
   "license": "MIT",
@@ -55,9 +55,9 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.85.0",
-    "@earendil-works/pi-coding-agent": "^0.85.0",
-    "@earendil-works/pi-tui": "^0.85.0",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
     "@types/node": "24.12.4",
     "tsx": "4.22.1",
     "typescript": "5.9.3"
