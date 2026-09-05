@@ -25,14 +25,14 @@ pi install npm:pi-fabric
 Pin the current releases when you want reproducible installs:
 
 ```bash
-pi install npm:pi-queue-steer-factory@0.14.0
+pi install npm:pi-queue-steer-factory@0.15.0
 pi install npm:pi-fabric@0.64.0
 ```
 
 The GitHub package is also installable directly:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.6.0
+pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.15.0
 ```
 
 Then start a new Pi session or run `/reload`.
