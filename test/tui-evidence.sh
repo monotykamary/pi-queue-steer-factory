@@ -221,21 +221,34 @@ if (( overflow_follow_up_count != 1 )); then
 	exit 1
 fi
 
-# Alternating lanes remain visible and execute in one global FIFO timeline.
+# Build an execution outline from queued roots, then indent the middle row.
 echo "Running interleaved timeline scenario"
 start_pi 100000 one-at-a-time
 send_text "BLOCK:interleave"
 wait_file "$STATE_DIR/provider-calls.jsonl" "BLOCK:interleave"
 queue_follow_up "queued turn one"
-queue_steer "steer inside turn one"
+queue_follow_up "steer inside turn one"
 queue_follow_up "queued turn two"
-wait_screen "queued turn two"
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3A'
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3A'
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3C'
+wait_screen "indents to steering on save"
+capture_plain "depth-preview"
+tmux -S "$SOCKET" send-keys -t "$PANE" Enter
+wait_screen "follow-up starts a run"
 capture_plain "interleaved-timeline"
 first_line=$(grep -nF "queued turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
 steer_line=$(grep -nF "steer inside turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
 second_line=$(grep -nF "queued turn two" "$ARTIFACT_DIR/interleaved-timeline.txt" | tail -1 | cut -d: -f1)
 if (( first_line >= steer_line || steer_line >= second_line )); then
-	echo "Interleaved lane segments rendered out of FIFO order" >&2
+	echo "Execution outline rendered out of FIFO order" >&2
+	exit 1
+fi
+if ! grep -Fq "delivery plan (3)" "$ARTIFACT_DIR/interleaved-timeline.txt" \
+	|| ! grep -Fq "│ ○ queued turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" \
+	|| ! grep -Fq "│   ↳ » steer inside turn one" "$ARTIFACT_DIR/interleaved-timeline.txt" \
+	|| ! grep -Fq "│ ○ queued turn two" "$ARTIFACT_DIR/interleaved-timeline.txt"; then
+	echo "Execution outline did not render queued roots around an indented steer" >&2
 	exit 1
 fi
 touch "$STATE_DIR/gate-interleave"
@@ -248,6 +261,34 @@ interleaved_context_count=$(
 )
 if (( interleaved_context_count != 1 )); then
 	echo "Interleaved rows did not reach provider context exactly once in FIFO order" >&2
+	exit 1
+fi
+
+# Leading steering belongs to the current run; a later follow-up is a root.
+echo "Running leading-steer outline scenario"
+start_pi 100000 one-at-a-time
+send_text "BLOCK:outline-leading"
+wait_file "$STATE_DIR/provider-calls.jsonl" "BLOCK:outline-leading"
+queue_steer "steer current work"
+queue_follow_up "queued root after steer"
+wait_screen "queued root after steer"
+capture_plain "leading-steer-outline"
+if ! grep -Fq "• current run" "$ARTIFACT_DIR/leading-steer-outline.txt" \
+	|| ! grep -Fq "│   ↳ ▶ steer current work" "$ARTIFACT_DIR/leading-steer-outline.txt" \
+	|| ! grep -Fq "│ ○ queued root after steer" "$ARTIFACT_DIR/leading-steer-outline.txt"; then
+	echo "Leading steering or following queued root had the wrong outline depth" >&2
+	exit 1
+fi
+touch "$STATE_DIR/gate-outline-leading"
+wait_screen "FAUX RESPONSE: queued root after steer" 30
+cp "$STATE_DIR/provider-calls.jsonl" "$ARTIFACT_DIR/leading-steer-provider-calls.jsonl"
+leading_context_count=$(
+	grep -Fc '"userPrefixes":["BLOCK:outline-leading","steer current work","queued root after steer"]' \
+		"$ARTIFACT_DIR/leading-steer-provider-calls.jsonl" \
+		|| true
+)
+if (( leading_context_count != 1 )); then
+	echo "Leading steer and following queue did not execute exactly once in FIFO order" >&2
 	exit 1
 fi
 
@@ -284,6 +325,6 @@ fi
 	echo "manual events: $(tr '\n' ' ' < "$ARTIFACT_DIR/manual-events.jsonl")"
 	echo "overflow events: $(tr '\n' ' ' < "$ARTIFACT_DIR/overflow-events.jsonl")"
 	echo "runtime initializations across two queued reloads: $(wc -l < "$ARTIFACT_DIR/reload-runtime-inits.log")"
-	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, interleaved-timeline, all-mode"
+	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, depth-preview, interleaved-timeline, leading-steer-outline, all-mode"
 } > "$ARTIFACT_DIR/summary.txt"
 cat "$ARTIFACT_DIR/summary.txt"

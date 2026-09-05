@@ -80,6 +80,8 @@ const INTERNAL_NEW_COMMAND = "queue-steer-factory-new";
 export const NATIVE_FLUSH_GRACE_MS = 2000;
 const REMOVE_ROW_KEY = "alt+x";
 const PAUSE_ROW_KEY = "alt+p";
+const OUTDENT_ROW_KEY: KeyId = "alt+left";
+const INDENT_ROW_KEY: KeyId = "alt+right";
 const TOGGLE_LANE_KEY = "alt+t";
 const AWAIT_PEERS_KEY = "alt+w";
 const REORDER_UP_KEY = "alt+shift+up";
@@ -129,6 +131,14 @@ function nextRowKeyText(): string {
 	return derived.length > 0 ? derived.join("/") : NEXT_ROW_FALLBACK_KEY;
 }
 
+function matchesOptionArrow(data: string, direction: "left" | "right"): boolean {
+	const arrow = direction === "left" ? OUTDENT_ROW_KEY : INDENT_ROW_KEY;
+	const wordAlias: KeyId = direction === "left" ? "alt+b" : "alt+f";
+	// Pi recognizes Alt+B/F as terminal fallbacks for word movement. Do not
+	// steal those distinct inputs when matching the physical Option+Arrow key.
+	return matchesKey(data, arrow) && !matchesKey(data, wordAlias);
+}
+
 interface QueueModes {
 	steer: QueueMode;
 	followUp: QueueMode;
@@ -137,7 +147,7 @@ interface QueueModes {
 /** A queue row with session drafts applied for display and navigation. */
 interface TimelineItem extends QueuedMessage<ImageContent> {
 	removed: boolean;
-	movedLane: boolean;
+	depthChanged: boolean;
 	held: boolean;
 	dispatchHead: boolean;
 	dispatchBatch: boolean;
@@ -190,70 +200,55 @@ class QueueTimelineWidget implements Component {
 			return [truncateToWidth(summary, width, "")];
 		}
 
-		const segments: { lane: QueueLane; items: TimelineItem[] }[] = [];
-		for (const item of this.items) {
-			const segment = segments.at(-1);
-			if (segment?.lane === item.lane) segment.items.push(item);
-			else segments.push({ lane: item.lane, items: [item] });
-		}
-
 		const lines: string[] = [];
-		for (const segment of segments) {
-			this.renderLaneBox(lines, segment.lane, segment.items, width);
-		}
+		this.renderTimelineBox(lines, width);
 		return lines;
 	}
 
-	private renderLaneBox(
-		lines: string[],
-		lane: QueueLane,
-		items: TimelineItem[],
-		width: number,
-	): void {
-		const color = laneColor(lane);
-		const border = (text: string) => this.theme.fg(color, text);
-		const laneHeld = items.some((item) => item.held);
-		const segmentAtHead = items.some((item) => item.dispatchHead);
-		const headPaused = items.find((item) => item.dispatchHead)?.rowPaused ?? false;
-		const stage = lane === "steer"
-			? segmentAtHead ? "next turn" : "next turn when reached"
-			: segmentAtHead ? "after this run" : "after run when reached";
+	private renderTimelineBox(lines: string[], width: number): void {
+		const border = (text: string) => this.theme.fg("borderMuted", text);
+		const head = this.items.find((item) => item.dispatchHead) ?? this.items[0];
+		const stage = head?.lane === "steer"
+			? this.idle ? "next: start run" : "next: steer current run"
+			: this.idle ? "next: start queued run" : "next: after this run";
 		const state = this.paused
 			? "paused"
-			: headPaused
+			: head?.rowPaused
 				? "held at paused row"
-				: laneHeld
+				: head?.held
 					? "held while editing"
 					: stage;
-		const name = lane === "steer" ? "steering queue" : "follow-ups";
-		const fullTitle = ` ${name} (${items.length}) · ${state} `;
-		const shortTitle = ` ${name} (${items.length}) `;
+		const fullTitle = ` delivery plan (${this.items.length}) · ${state} `;
+		const shortTitle = ` delivery plan (${this.items.length}) `;
 		const title = visibleWidth(fullTitle) + 2 <= width ? fullTitle : shortTitle;
 		const topFill = "─".repeat(Math.max(0, width - visibleWidth(title) - 2));
 		lines.push(border(`┌${title}${topFill}┐`));
 		const cellWidth = width - 4;
 
-		for (const item of items) this.renderItem(lines, item, cellWidth, border);
+		if (this.items[0]?.lane === "steer") {
+			const context = this.idle ? "next run" : "current run";
+			lines.push(`${border("│")} ${fitCell(this.theme.fg("dim", `• ${context}`), cellWidth)} ${border("│")}`);
+		}
+		for (const item of this.items) this.renderItem(lines, item, cellWidth, border);
 
 		const dequeue = keyText("app.message.dequeue");
 		const followUp = keyText("app.message.followUp");
 		const submit = keyText("tui.input.submit");
 		const interrupt = keyText("app.interrupt");
-		const selectedHere = items.some((item) => item.id === this.editingId);
 		const help = this.editingId
-			? selectedHere
-				? `${dequeue}/${nextRowKeyText()} move · ${REORDER_UP_KEY}/${REORDER_DOWN_KEY} reorder · ${REMOVE_ROW_KEY} remove · ${TOGGLE_LANE_KEY} lane · ${PAUSE_ROW_KEY} pause · ${submit} save · ${interrupt} cancel`
-				: `${dequeue}/${nextRowKeyText()} move here · ${interrupt} cancel`
+			? [
+				`${OUTDENT_ROW_KEY} outdent to follow-up · ${INDENT_ROW_KEY} indent to steer`,
+				`${dequeue}/${nextRowKeyText()} row · ${REORDER_UP_KEY}/${REORDER_DOWN_KEY} reorder`,
+				`${REMOVE_ROW_KEY} remove · ${PAUSE_ROW_KEY} pause · ${submit} save · ${interrupt} cancel`,
+			]
 			: this.paused
-				? this.idle
+				? [this.idle
 					? `${followUp} queue · ${submit} send · ${dequeue} edit`
-					: `${submit} resume · ${dequeue} edit · ${interrupt} keep paused`
-				: !segmentAtHead
-					? `waits for earlier rows · ${dequeue} edit`
-					: lane === "steer"
-						? `${submit} steer/send next · ${dequeue} edit`
-						: `${followUp} add follow-up · ${submit} send next · ${dequeue} edit`;
-		lines.push(`${border("│")} ${fitCell(this.theme.fg("dim", help), cellWidth)} ${border("│")}`);
+					: `${submit} resume · ${dequeue} edit · ${interrupt} keep paused`]
+				: [`○ follow-up starts a run · ↳ steering joins that run · ${dequeue} edit`];
+		for (const line of help) {
+			lines.push(`${border("│")} ${fitCell(this.theme.fg("dim", line), cellWidth)} ${border("│")}`);
+		}
 		lines.push(border(`└${"─".repeat(width - 2)}┘`));
 	}
 
@@ -267,10 +262,11 @@ class QueueTimelineWidget implements Component {
 		const head = item.dispatchHead;
 		const armed = item.dispatchBatch && (this.modes[item.lane] === "all" || head);
 		const color = laneColor(item.lane);
+		const depthPrefix = item.lane === "steer" ? "  ↳ " : "";
 
 		if (!selected) {
 			if (item.removed) {
-				const prefix = this.theme.fg("error", "✕ ");
+				const prefix = this.theme.fg("error", `${depthPrefix}✕ `);
 				const body = this.theme.fg("dim", `${compactText(item)} · removed on save`);
 				lines.push(`${border("│")} ${fitCell(`${prefix}${body}`, cellWidth)} ${border("│")}`);
 				return;
@@ -284,20 +280,22 @@ class QueueTimelineWidget implements Component {
 						: armed
 							? "▶"
 							: "»";
-			const prefix = this.theme.fg(color, `${marker} `);
+			const prefix = this.theme.fg(color, `${depthPrefix}${marker} `);
 			const pausedNote = item.rowPaused
 				? this.theme.fg("dim", head ? " · paused — dispatch holds here" : " · paused")
 				: "";
-			const moved = item.movedLane ? this.theme.fg("dim", " · moves here on save") : "";
-			const commandNote = item.command && !item.movedLane
+			const depthNote = item.depthChanged
+				? this.theme.fg("dim", item.lane === "steer" ? " · indents on save" : " · outdents on save")
+				: "";
+			const commandNote = item.command && !item.depthChanged
 				? this.theme.fg("dim", item.command.kind === "fabric-await" && this.awaitNote ? ` · ${this.awaitNote}` : " · runs when idle")
 				: "";
 			const body = this.theme.fg("muted", compactText(item));
-			lines.push(`${border("│")} ${fitCell(`${prefix}${body}${commandNote}${pausedNote}${moved}`, cellWidth)} ${border("│")}`);
+			lines.push(`${border("│")} ${fitCell(`${prefix}${body}${commandNote}${pausedNote}${depthNote}`, cellWidth)} ${border("│")}`);
 			return;
 		}
 
-		const prefixText = "› ";
+		const prefixText = `${depthPrefix}› `;
 		const prefixWidth = visibleWidth(prefixText);
 		const editorWidth = Math.max(1, cellWidth - prefixWidth);
 		const editorLines = this.renderInlineEditor?.(editorWidth) ?? [item.text];
@@ -307,7 +305,11 @@ class QueueTimelineWidget implements Component {
 		}
 		const notes: string[] = [];
 		if (item.removed) notes.push(`removed on save · ${REMOVE_ROW_KEY} undoes`);
-		else if (item.movedLane) notes.push(`moves here on save · ${TOGGLE_LANE_KEY} undoes`);
+		else if (item.depthChanged) {
+			notes.push(item.lane === "steer"
+				? `indents to steering on save · ${OUTDENT_ROW_KEY} undoes`
+				: `outdents to follow-up on save · ${INDENT_ROW_KEY} undoes`);
+		}
 		if (item.rowPauseDrafted && !item.removed) {
 			notes.push(item.rowPaused ? `pauses on save · ${PAUSE_ROW_KEY} undoes` : `resumes on save · ${PAUSE_ROW_KEY} undoes`);
 		}
@@ -575,9 +577,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	/**
 	 * Reorder the selected row within its committed lane. Position changes
 	 * apply to dispatch order at once; the session records inverses so Escape
-	 * restores positions. A pending lane toggle freezes position until saved
-	 * or undone, since the row previews in a lane it has not physically
-	 * joined.
+	 * restores positions. A pending depth change freezes position until saved
+	 * or undone, since lane-neighbour reordering still follows committed state.
 	 */
 	const reorderSelectedRow = (ctx: ExtensionContext, direction: -1 | 1): void => {
 		const session = editSession;
@@ -586,7 +587,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (!item) return;
 		const draftLane = session.laneFor(item.id);
 		if (draftLane && draftLane !== item.lane) {
-			ctx.ui.notify(`Undo the pending lane move (${TOGGLE_LANE_KEY}) before reordering this row`, "info");
+			ctx.ui.notify(`Save or undo the pending depth change (${OUTDENT_ROW_KEY}/${INDENT_ROW_KEY}) before reordering this row`, "info");
 			return;
 		}
 		if (session.moveRow(queue, item.id, direction)) renderQueue(ctx);
@@ -595,9 +596,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	/**
 	 * Queue rows with session drafts applied, in global delivery order.
 	 *
-	 * Rows re-laned in the current session preview at their destination lane's
-	 * visual tail, matching the commit algorithm. Held flags follow dispatch
-	 * truth: an uncommitted lane draft never changes delivery.
+	 * Drafted depth changes stay in the row's existing timeline slot. Held flags
+	 * follow dispatch truth: an uncommitted lane draft never changes delivery.
 	 */
 	const timelineItems = (): TimelineItem[] => {
 		const modes = queueModes();
@@ -618,7 +618,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				images,
 				lane,
 				removed: editSession?.isRemoved(item.id) ?? false,
-				movedLane: lane !== item.lane,
+				depthChanged: lane !== item.lane,
 				rowPaused: editSession?.pausedFor(item.id) ?? (item.paused ?? false),
 				rowPauseDrafted: editSession?.pausedFor(item.id) !== undefined
 					&& editSession.pausedFor(item.id) !== (item.paused ?? false),
@@ -628,22 +628,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				command: itemCommand({ text, images }),
 			};
 		});
-		const ordered = [...decorated];
-		const committedLanes = new Map(committed.map((item) => [item.id, item.lane]));
-		for (const original of committed) {
-			const fromIndex = ordered.findIndex((item) => item.id === original.id);
-			const item = ordered[fromIndex];
-			if (!item?.movedLane) continue;
-			ordered.splice(fromIndex, 1);
-			committedLanes.set(item.id, item.lane);
-			let destinationTail = -1;
-			for (const [index, candidate] of ordered.entries()) {
-				if (committedLanes.get(candidate.id) === item.lane) destinationTail = index;
-			}
-			if (destinationTail === -1) ordered.push(item);
-			else ordered.splice(destinationTail + 1, 0, item);
-		}
-		return ordered;
+		return decorated;
 	};
 
 	// Publish the queue snapshot on every render (the choke point all queue,
@@ -1266,7 +1251,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(`Removed ${result.removed} queued message${result.removed === 1 ? "" : "s"}`, "info");
 		}
 		if (result?.moved) {
-			ctx.ui.notify(`Moved ${result.moved} queued message${result.moved === 1 ? "" : "s"} to the other lane`, "info");
+			ctx.ui.notify(`Changed delivery depth for ${result.moved} queued row${result.moved === 1 ? "" : "s"}`, "info");
 		}
 		if (result?.held) {
 			ctx.ui.notify(`Paused ${result.held} queued row${result.held === 1 ? "" : "s"} — dispatch stops there until resumed`, "info");
@@ -1367,6 +1352,16 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 					}
 					if (matchesKey(data, REMOVE_ROW_KEY)) {
 						editSession.toggleRemoved(editSession.selectedId);
+						renderQueue(ctx);
+						return;
+					}
+					if (matchesOptionArrow(data, "left")) {
+						editSession.setLane(editSession.selectedId, "followUp");
+						renderQueue(ctx);
+						return;
+					}
+					if (matchesOptionArrow(data, "right")) {
+						editSession.setLane(editSession.selectedId, "steer");
 						renderQueue(ctx);
 						return;
 					}

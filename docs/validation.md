@@ -23,9 +23,9 @@ npm update --ignore-scripts \
 npm run ci
 ```
 
-The suite covers global steering/follow-up interleaving, queue/edit invariants, command classification, images, one-at-a-time and barrier-bounded all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
+The suite covers global steering/follow-up interleaving, execution-outline rendering, in-place Option+Left/Right depth changes and word-navigation compatibility, queue/edit invariants, command classification, images, one-at-a-time and barrier-bounded all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
 
-Latest result with Pi 0.85.0: 183 tests passed.
+Latest result with Pi 0.85.0: 188 tests passed.
 
 ## Factory control pipeline
 
@@ -57,7 +57,7 @@ Run:
 ./test/tui-evidence.sh /tmp/pi-queue-tui-evidence
 ```
 
-The output directory contains plain terminal captures, provider-call logs, lifecycle-event logs, and runtime-initialization logs. `interleaved-timeline.txt` must show follow-up → steering → follow-up as three ordered yellow/blue/yellow segments, while `interleaved-provider-calls.jsonl` verifies those rows reached successive provider contexts exactly once in the same order. Run the harness immediately before review so `summary.txt` records the exact Pi version, commit and working-tree state under test. A release evidence run should report `working tree: clean`.
+The output directory contains plain terminal captures, provider-call logs, lifecycle-event logs, and runtime-initialization logs. `depth-preview.txt` proves a physical Option+Right indents a selected queued row in place; `interleaved-timeline.txt` then shows follow-up → steering → follow-up inside one delivery plan, with the blue steering row between two yellow roots. `leading-steer-outline.txt` proves the inverse shape: leading steering nests under the implicit current run while the following queue remains a root. Their provider-call logs verify both sequences reached successive contexts exactly once in FIFO order. Run the harness immediately before review so `summary.txt` records the exact Pi version, commit and working-tree state under test. A release evidence run should report `working tree: clean`.
 
 The latest complete run reported:
 

@@ -66,8 +66,9 @@ export interface QueuedMessage<TImage = unknown> {
 /**
  * One FIFO timeline whose rows retain their steering or follow-up delivery lane.
  *
- * Lane changes never reorder untouched rows, and sequence remains a separate
- * enqueue-recency clock so editing can enter at the newest row after reorders.
+ * Delivery-depth changes preserve global row positions, and sequence remains a
+ * separate enqueue-recency clock so editing can enter at the newest row after
+ * explicit reorders.
  */
 export class DeliveryQueue<TImage = unknown> {
 	private items: QueuedMessage<TImage>[] = [];
@@ -137,19 +138,11 @@ export class DeliveryQueue<TImage = unknown> {
 		return true;
 	}
 
-	/** Reclassify a row into the other lane, joining that lane's visual tail. */
-	moveToLaneTail(id: string, lane: QueueLane): boolean {
-		const index = this.items.findIndex((item) => item.id === id);
-		if (index === -1) return false;
-		const [item] = this.items.splice(index, 1);
-		if (!item) return false;
+	/** Change a row's delivery depth without changing its timeline position. */
+	setLane(id: string, lane: QueueLane): boolean {
+		const item = this.items.find((candidate) => candidate.id === id);
+		if (!item || item.lane === lane) return false;
 		item.lane = lane;
-		let destinationTail = -1;
-		for (const [candidateIndex, candidate] of this.items.entries()) {
-			if (candidate.lane === lane) destinationTail = candidateIndex;
-		}
-		if (destinationTail === -1) this.items.push(item);
-		else this.items.splice(destinationTail + 1, 0, item);
 		return true;
 	}
 
@@ -356,12 +349,18 @@ export class QueueEditSession<TImage = unknown> {
 		return draft.removed;
 	}
 
-	/** Toggle the row's draft delivery lane. Returns the new lane. */
-	toggleLane(id: string): QueueLane | undefined {
+	/** Set the row's draft delivery depth. Returns the effective lane. */
+	setLane(id: string, lane: QueueLane): QueueLane | undefined {
 		const draft = this.drafts.get(id);
 		if (!draft) return undefined;
-		draft.lane = draft.lane === "steer" ? "followUp" : "steer";
+		draft.lane = lane;
 		return draft.lane;
+	}
+
+	/** Legacy toggle for terminals where Option+Arrow cannot be distinguished. */
+	toggleLane(id: string): QueueLane | undefined {
+		const draft = this.drafts.get(id);
+		return draft ? this.setLane(id, draft.lane === "steer" ? "followUp" : "steer") : undefined;
 	}
 
 	/** Toggle the row's draft dispatch hold. Returns the new paused state. */
@@ -420,17 +419,10 @@ export class QueueEditSession<TImage = unknown> {
 				continue;
 			}
 			if (queue.update(draft.id, draft.text, draft.images)) updated += 1;
+			if (queue.setLane(draft.id, draft.lane)) moved += 1;
 			if (queue.setPaused(draft.id, draft.paused)) {
 				if (draft.paused) held += 1;
 				else released += 1;
-			}
-		}
-		// Apply lane moves in queue order so multi-row moves land at the
-		// destination tail in the same order the timeline previewed them.
-		for (const item of queue.snapshot()) {
-			const draft = this.drafts.get(item.id);
-			if (draft && !draft.removed && draft.lane !== item.lane) {
-				if (queue.moveToLaneTail(item.id, draft.lane)) moved += 1;
 			}
 		}
 		return { updated, removed, moved, held, released };

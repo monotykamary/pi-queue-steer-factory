@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The queue now renders as one execution outline: yellow follow-ups are root rows that start runs, blue steering rows indent beneath the run they join, and leading steering appears under an implicit current/next run. While editing, `Option+Right` indents a row to steering and `Option+Left` outdents it to follow-up without moving its FIFO position; `Option+T` remains a fallback for terminals that collapse Option+Arrow into word-navigation bytes.
+
 ## 0.14.0 - 2026-09-05
 
 ### Changed

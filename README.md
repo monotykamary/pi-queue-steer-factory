@@ -5,7 +5,7 @@
 
 A visible steering, follow-up, and session-control timeline for [Pi](https://github.com/earendil-works/pi-mono), with acknowledged [`/fabric prewalk`](https://github.com/monotykamary/pi-fabric) barriers.
 
-Queue instructions while the agent works. Every row keeps its Pi delivery timing — blue steering at a turn boundary, yellow follow-up after a run — inside one first-in, first-out timeline. Consecutive rows share a coloured box, and alternating steering and follow-up rows stay visibly interleaved in the order you queued them.
+Queue instructions while the agent works. Every row keeps its Pi delivery timing — blue steering at a turn boundary, yellow follow-up after a run — inside one first-in, first-out execution outline. Follow-ups are root rows that start runs; steering is indented beneath the run it will join.
 
 Move into any row to edit it. The selected row becomes the live Pi editor, with its cursor, wrapping, paste handling, autocomplete and custom-editor behaviour intact.
 
@@ -50,22 +50,38 @@ The extension follows your configured Pi action bindings. These are the default 
 | Editing a row | `Option+Down` | Keep the current draft and move to the next visual row; mirrors the configured `Option+Up` action |
 | Editing a row | Type normally | Edit directly inside the selected row |
 | Editing a row | `Option+X` | Mark the selected row for removal; save deletes it, a second press restores it |
-| Editing a row | `Option+T` | Move the selected row to the other lane when saved |
+| Editing a row | `Option+Right` | Indent the row into steering for the run above; its timeline position does not change |
+| Editing a row | `Option+Left` | Outdent the row into a follow-up that starts the next run; its timeline position does not change |
+| Editing a row | `Option+T` | Toggle the same depth as a fallback when a terminal cannot distinguish Option+Arrow |
 | Editing a row | `Option+P` | Pause or resume the selected row where it sits; a paused row stops dispatch at its position until resumed |
 | Editing a row | `Option+Shift+Up` / `Option+Shift+Down` | Reorder the selected row within its lane; positions apply immediately and roll back on `Escape` |
-| Editing a row | `Enter` or `Option+Enter` | Save all row edits without changing their lanes |
+| Editing a row | `Enter` or `Option+Enter` | Save all row edits, including explicit indent/outdent drafts |
 | Editing a row | `Escape` | Cancel the session and roll back all unsaved row edits |
 | Empty composer, follow-up at the timeline head | `Enter` | Promote that next follow-up to steering now |
 | Queue paused after an abort | `Enter` | Resume from the next timeline row |
 | Queue paused after a run error | `Enter` | Resume manually; a recovered run (built-in retry, auto-compact, pi-retry) releases the queue first |
 | Queue restored after resume | `Enter` | Send the next queued row; `Option+Up` edits it first |
 | Agent stopped | `Option+Enter` | Queue a message, skill/template, or control command (`/compact`, `/reload`, `/new`, `/model`, `/thinking`, `/fabric prewalk`) visibly and paused |
-| Agent working, queue visible | `Escape` | Abort the run and pause both visible lanes |
+| Agent working, queue visible | `Escape` | Abort the run and pause the entire delivery plan |
 | Agent working | `/pause` | Pause the run once every in-flight tool call finishes; tool work is never killed mid-execution |
 | Any state | `Option+W` | Toggle a peer settle gate row (pick a peer or all peers) |
 | Peer gate waiting | `Escape` | Cancel the wait and pause the gate row |
 
-`Option+W`, `Option+X`, `Option+T`, `Option+P` and `Option+Shift+Up/Down` are the only new fixed shortcuts. The other controls use Pi’s configured action bindings, and the next-row key mirrors whatever `app.message.dequeue` is bound to — rebind that action to `ctrl+up` and next-row becomes `ctrl+down`. A dequeue binding with no `up` twin keeps `Option+Down`. Terminals outside macOS may label `Option` as `Alt`.
+`Option+Left/Right`, `Option+W`, `Option+X`, `Option+T`, `Option+P` and `Option+Shift+Up/Down` are fixed shortcuts. The other controls use Pi’s configured action bindings, and the next-row key mirrors whatever `app.message.dequeue` is bound to — rebind that action to `ctrl+up` and next-row becomes `ctrl+down`. A dequeue binding with no `up` twin keeps `Option+Down`. The physical arrow sequences change depth only while editing queued rows; `Option+B/F` remain editor word navigation. A terminal that encodes Option+Arrow as those indistinguishable word-navigation bytes can use `Option+T` instead. Terminals outside macOS may label `Option` as `Alt`.
+
+## Execution outline
+
+The indentation is deliberately one-way:
+
+```text
+• current run
+  ↳ steer current work
+○ queued run A
+  ↳ steer inside A
+○ queued run B
+```
+
+A yellow follow-up is a root because it starts a run. Any blue steering rows immediately after it are children because they enter that run at turn boundaries. Leading steering rows sit under an implicit **current run** (or **next run** while idle). A follow-up after steering always outdents to start another run; queues are therefore never shown as children of steers. There are exactly two depths, so `Option+Right` on steering and `Option+Left` on a follow-up are no-ops. The keys preview real depth changes in place, and saving changes only delivery timing—not FIFO position, text, images, or row identity.
 
 ## Pausing at a tool boundary
 
@@ -86,9 +102,9 @@ The extension keeps Pi’s 2 delivery classes inside one ordered timeline:
 - steering at the timeline head reaches the current run at Pi’s next safe turn boundary
 - a follow-up at the head waits until the current run finishes
 - later rows never overtake the head because they use the other delivery class
-- consecutive rows in one lane share a coloured box; blue and yellow boxes can alternate
+- yellow follow-ups stay at the root and blue steering rows indent beneath the run they will join
 - reordered rows keep their stable IDs, text drafts and attachments
-- reordering waits while a lane toggle is pending; the lane move lands first on save
+- reordering waits while an indent/outdent draft is pending; saving the depth change keeps the row in its existing timeline slot
 - Pi’s `one-at-a-time` and `all` settings still apply per lane, but an `all` batch stops at the next lane switch, command, or paused row
 
 This makes both directions composable. Queueing `follow-up A → steer A → follow-up B` starts A after the current run, injects the steering into A at its next turn boundary, then starts B only after that run settles. While an agent is working, enter that sequence with `Option+Enter`, `Enter`, then `Option+Enter`; queueing steering before a follow-up keeps the inverse relationship just as strictly.
@@ -101,7 +117,7 @@ A run that ends in an error (including context overflow) pauses the queue instea
 
 ## Queueing while stopped
 
-With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission into the yellow follow-up box, paused — including skill and prompt-template invocations and the supported `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
+With the agent stopped, `Enter` keeps Pi's normal immediate send. `Option+Enter` instead places the submission as a yellow follow-up root, paused — including skill and prompt-template invocations and the supported `/compact [instructions]`, `/reload`, `/new`, `/model [target]`, `/thinking [level]`, exact `/fabric prewalk`, and `/fabric await [label]` controls. Press `Enter` on the empty composer to execute the next row, or `Option+Up` to edit it first.
 
 A plain `Enter` still runs every command immediately. With `Option+Enter`, other Pi built-ins, other extension commands, unknown slash input and `!` bash keep passing straight through.
 
@@ -161,12 +177,12 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 
 - `Option+Up` starts at the row you queued most recently
 - `Option+Up` and `Option+Down` then move through the visible timeline
-- saving never changes a row’s lane implicitly; `Option+T` re-lanes the selected row explicitly, and it joins the tail of its new lane on save
-- a re-laned row previews inside its destination box before the save commits it
+- saving never changes a row’s lane implicitly; `Option+Right` indents to steering and `Option+Left` outdents to follow-up
+- depth changes preview in place and commit without changing the row’s global timeline position; `Option+T` remains a toggle fallback
 - `Option+X` marks the selected row for removal; save deletes it, and `Escape` or a second `Option+X` restores it
 - a selected row becomes the real editor without a nested composer frame
 - one editing session can hold drafts for several rows
-- `Escape` restores every row from the session snapshot, including removal marks and lane toggles
+- `Escape` restores every row from the session snapshot, including removal marks and indent/outdent drafts
 - saving an empty text-only row removes it
 - image-only rows survive text clearing; `Option+X` removes them
 - an unrelated composer draft is stashed and restored when editing ends
@@ -175,7 +191,7 @@ A touched head row is pinned until you save or cancel. In `one-at-a-time` mode, 
 
 ## Abort and recovery
 
-Aborting a run pauses both visible lanes. This prevents a follow-up from starting immediately after the abort.
+Aborting a run pauses the entire visible delivery plan. This prevents a follow-up from starting immediately after the abort.
 
 Press `Enter` on the empty composer to resume; the same keypress sends rows queued while stopped. A synchronous handoff or preflight failure returns the affected batch to the global timeline head.
 

@@ -136,37 +136,39 @@ test("removal marks delete any row on commit, including image-only rows", () => 
 	assert.deepEqual(queue.laneSnapshot("followUp").map((item) => item.text), ["keep me"]);
 });
 
-test("lane toggles re-lane rows to the destination tail on commit only", () => {
+test("lane drafts change delivery depth in place on commit only", () => {
 	const queue = new DeliveryQueue();
 	const promote = queue.enqueue("followUp", "promote me");
 	queue.enqueue("steer", "steer one");
 	queue.enqueue("steer", "steer two");
 
 	const edit = new QueueEditSession(promote, "");
-	assert.equal(edit.toggleLane(promote.id), "steer");
+	assert.equal(edit.setLane(promote.id, "steer"), "steer");
+	assert.equal(edit.setLane(promote.id, "steer"), "steer");
 	assert.equal(edit.laneFor(promote.id), "steer");
 	assert.equal(queue.get(promote.id)?.lane, "followUp");
 
 	assert.deepEqual(edit.commit(queue, "promote me"), { updated: 1, removed: 0, moved: 1, held: 0, released: 0 });
 	assert.deepEqual(
-		queue.laneSnapshot("steer").map((item) => item.text),
-		["steer one", "steer two", "promote me"],
+		queue.snapshot().map((item) => [item.lane, item.text]),
+		[["steer", "promote me"], ["steer", "steer one"], ["steer", "steer two"]],
 	);
 	assert.equal(queue.get(promote.id)?.id, promote.id);
 	assert.equal(queue.laneLength("followUp"), 0);
 });
 
-test("lane toggles join the destination visual tail without moving later rows", () => {
+test("changing delivery depth never moves surrounding timeline rows", () => {
 	const queue = new DeliveryQueue();
 	const steer = queue.enqueue("steer", "steer one");
 	const later = queue.enqueue("followUp", "later one");
 	const promote = queue.enqueue("followUp", "promote me");
 
 	const edit = new QueueEditSession(promote, "");
-	edit.toggleLane(promote.id);
+	edit.setLane(promote.id, "steer");
 	edit.commit(queue, "promote me");
 
-	assert.deepEqual(queue.snapshot().map((item) => item.id), [steer.id, promote.id, later.id]);
+	assert.deepEqual(queue.snapshot().map((item) => item.id), [steer.id, later.id, promote.id]);
+	assert.deepEqual(queue.snapshot().map((item) => item.lane), ["steer", "followUp", "steer"]);
 });
 
 test("toggling a lane twice leaves the row untouched at commit", () => {
@@ -223,6 +225,7 @@ test("session reorders roll back in reverse and keep row identity", () => {
 class MockEditor {
 	private text = "";
 	private autocompleteVisible = false;
+	readonly handledInputs: string[] = [];
 	onSubmit?: (text: string) => void;
 	onChange?: (text: string) => void;
 
@@ -243,7 +246,9 @@ class MockEditor {
 		this.onChange?.(text);
 	}
 
-	handleInput(_data: string): void {}
+	handleInput(data: string): void {
+		this.handledInputs.push(data);
+	}
 
 	render(width: number): string[] {
 		const border = "─".repeat(width);
@@ -503,7 +508,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 	assert.fail("Timed out waiting for condition");
 }
 
-test("renders lane segments in global queue order", async () => {
+test("renders one execution outline with steering nested under queued runs", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "write the README");
@@ -512,16 +517,34 @@ test("renders lane segments in global queue order", async () => {
 
 	const rendered = renderWidget(harness);
 	const lines = rendered.split("\n");
-	assert.equal(lines.filter((line) => line.startsWith("┌")).length, 3);
+	const first = lines.find((line) => line.includes("write the README"));
+	const nested = lines.find((line) => line.includes("check the API next"));
+	const second = lines.find((line) => line.includes("then update the tests"));
+	assert.equal(lines.filter((line) => line.startsWith("┌")).length, 1);
+	assert.match(lines[0] ?? "", /delivery plan \(3\) · next: after this run/);
+	assert.ok(first && nested && second);
+	assert.match(first, /│ ○ write the README/);
+	assert.match(nested, /│   ↳ » check the API next/);
+	assert.match(second, /│ ○ then update the tests/);
 	assert.ok(rendered.indexOf("write the README") < rendered.indexOf("check the API next"));
 	assert.ok(rendered.indexOf("check the API next") < rendered.indexOf("then update the tests"));
-	assert.equal(rendered.match(/follow-ups \(1\)/g)?.length, 2);
-	assert.match(rendered, /next turn when reached/);
-	assert.match(rendered, /after this run/);
-	assert.match(rendered, /waits for earlier rows/);
+	assert.match(rendered, /follow-up starts a run · ↳ steering joins that run/);
 });
 
-test("colors each lane's full box instead of only its row label", async () => {
+test("leading steering nests under an implicit current run while follow-ups stay roots", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "clarify current work");
+	await enqueue(harness, "followUp", "start the next task");
+
+	const rendered = renderWidget(harness);
+	assert.match(rendered, /• current run/);
+	assert.match(rendered, /│   ↳ ▶ clarify current work/);
+	assert.match(rendered, /│ ○ start the next task/);
+	assert.ok(rendered.indexOf("current run") < rendered.indexOf("clarify current work"));
+});
+
+test("uses a neutral outline with lane-colored depth markers", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "blue row");
@@ -536,8 +559,9 @@ test("colors each lane's full box instead of only its row label", async () => {
 	});
 
 	component.render(76);
-	assert.ok(calls.some(([color, text]) => color === "accent" && text.startsWith("┌ steering queue")));
-	assert.ok(calls.some(([color, text]) => color === "warning" && text.startsWith("┌ follow-ups")));
+	assert.ok(calls.some(([color, text]) => color === "borderMuted" && text.startsWith("┌ delivery plan")));
+	assert.ok(calls.some(([color, text]) => color === "accent" && text.startsWith("  ↳ ▶")));
+	assert.ok(calls.some(([color, text]) => color === "warning" && text === "○ "));
 	assert.ok(calls.some(([color, text]) => color === "muted" && text === "blue row"));
 	assert.ok(calls.some(([color, text]) => color === "muted" && text === "yellow row"));
 });
@@ -1034,6 +1058,37 @@ test("saving a removal persists the trimmed queue before shutdown", async () => 
 	assert.doesNotMatch(renderWidget(resumed), /keep me/);
 });
 
+test("saving an indent persists its exact execution-outline position", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "queued parent");
+	await enqueue(harness, "followUp", "nested after save");
+	await enqueue(harness, "followUp", "next root");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1b[1;3C");
+	harness.editor.handleInput("enter");
+
+	const recorded = harness.appendedEntries.at(-1);
+	assert.ok(recorded, "a depth save should append a superseding snapshot");
+	assert.equal(recorded.customType, QUEUE_SNAPSHOT_TYPE);
+	if (!isQueueSnapshot(recorded.data)) assert.fail("recorded payload should be a readable snapshot");
+	assert.deepEqual(recorded.data.rows.map((row) => [row.lane, row.text]), [
+		["followUp", "queued parent"],
+		["steer", "nested after save"],
+		["followUp", "next root"],
+	]);
+
+	const resumed = createHarness({ sessionEntries: [{ type: "custom", ...recorded }] });
+	await resumed.emit("session_start", { reason: "resume" });
+	const restored = renderWidget(resumed);
+	assert.match(restored, /delivery plan \(3\) · paused/);
+	assert.match(restored, /│ ⏸ queued parent/);
+	assert.match(restored, /│   ↳ » nested after save/);
+	assert.match(restored, /│ ○ next root/);
+});
+
 test("removing the last row tombstones the persisted queue", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
@@ -1068,41 +1123,101 @@ test("a removal-marked head stays pinned at delivery boundaries", async () => {
 	assert.match(renderWidget(harness), /held while editing/);
 });
 
-test("Alt+T previews a follow-up in the steering box and re-lanes on save", async () => {
+test("Option+Right indents a follow-up under its preceding queued run without moving it", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
-	await enqueue(harness, "steer", "steer one");
-	await enqueue(harness, "followUp", "promote me");
+	await enqueue(harness, "followUp", "queued parent");
+	await enqueue(harness, "followUp", "steer inside parent");
 
 	harness.editor.handleInput("alt-up");
-	harness.editor.handleInput("\x1bt");
+	harness.editor.handleInput("\x1b[1;3C");
 	const preview = renderWidget(harness);
-	assert.match(preview, /steering queue \(2\)/);
-	assert.match(preview, /moves here on save/);
-	assert.ok(preview.indexOf("steer one") < preview.indexOf("promote me"));
+	assert.match(preview, /│ ○ queued parent/);
+	assert.match(preview, /│   ↳ › steer inside parent/);
+	assert.match(preview, /indents to steering on save/);
+	assert.ok(preview.indexOf("queued parent") < preview.indexOf("steer inside parent"));
 
 	harness.editor.handleInput("enter");
-	assert.match(harness.notifications[0]?.message ?? "", /Moved 1 queued message to the other lane/);
-	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.match(harness.notifications[0]?.message ?? "", /Changed delivery depth for 1 queued row/);
+	await harness.emit("agent_end");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.deepEqual(harness.sent.map((item) => [item.content, item.options]), [
-		["steer one", { deliverAs: "steer" }],
-		["promote me", { deliverAs: "steer" }],
+		["queued parent", { deliverAs: "followUp" }],
+		["steer inside parent", { deliverAs: "steer" }],
 	]);
 });
 
-test("Escape rolls back a lane toggle with the rest of the session", async () => {
+test("Option+Left outdents steering into the next queued run", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "steer current run");
+	await enqueue(harness, "steer", "become next run");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1b[1;3D");
+	const preview = renderWidget(harness);
+	assert.match(preview, /│   ↳ ▶ steer current run/);
+	assert.match(preview, /│ › become next run/);
+	assert.match(preview, /outdents to follow-up on save/);
+
+	harness.editor.handleInput("enter");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	await harness.emit("agent_end");
+	assert.deepEqual(harness.sent.map((item) => [item.content, item.options]), [
+		["steer current run", { deliverAs: "steer" }],
+		["become next run", { deliverAs: "followUp" }],
+	]);
+});
+
+test("Escape rolls back a directional depth change with the rest of the session", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "stay a follow-up");
 
 	harness.editor.handleInput("alt-up");
-	harness.editor.handleInput("\x1bt");
+	harness.editor.handleInput("\x1b[1;3C");
 	harness.editor.handleInput("escape");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.equal(harness.sent.length, 0);
 	await harness.emit("agent_end");
 	assert.deepEqual(harness.sent[0], { content: "stay a follow-up", options: { deliverAs: "followUp" } });
+});
+
+test("Alt+T remains a depth-toggle fallback", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "toggle fallback");
+
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1bt");
+	assert.match(renderWidget(harness), /indents to steering on save/);
+	harness.editor.handleInput("enter");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent[0], { content: "toggle fallback", options: { deliverAs: "steer" } });
+});
+
+test("Alt+B and Alt+F retain editor word navigation instead of changing depth", async () => {
+	const followUp = createHarness();
+	await followUp.emit("session_start");
+	await enqueue(followUp, "followUp", "word navigation");
+	followUp.editor.handleInput("alt-up");
+	followUp.editor.handleInput("\x1bf");
+	assert.deepEqual(followUp.editor.handledInputs, ["\x1bf"]);
+	assert.doesNotMatch(renderWidget(followUp), /indents on save/);
+	followUp.editor.handleInput("enter");
+	await followUp.emit("agent_end");
+	assert.deepEqual(followUp.sent[0], { content: "word navigation", options: { deliverAs: "followUp" } });
+
+	const steer = createHarness();
+	await steer.emit("session_start");
+	await enqueue(steer, "steer", "back a word");
+	steer.editor.handleInput("alt-up");
+	steer.editor.handleInput("\x1bb");
+	assert.deepEqual(steer.editor.handledInputs, ["\x1bb"]);
+	assert.doesNotMatch(renderWidget(steer), /outdents on save/);
+	steer.editor.handleInput("enter");
+	await steer.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(steer.sent[0], { content: "back a word", options: { deliverAs: "steer" } });
 });
 
 test("Alt+Shift+Up reorders the selected row on screen and at dispatch", async () => {
@@ -1147,16 +1262,16 @@ test("Escape restores the original lane order after an in-session reorder", asyn
 	assert.deepEqual(harness.sent[0], { content: "first", options: { deliverAs: "steer" } });
 });
 
-test("a pending lane toggle freezes reorder until undone or saved", async () => {
+test("a pending depth change freezes reorder until undone or saved", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "steer one");
 	await enqueue(harness, "followUp", "promote me");
 
 	harness.editor.handleInput("alt-up");
-	harness.editor.handleInput("\x1bt");
+	harness.editor.handleInput("\x1b[1;3C");
 	harness.editor.handleInput("\x1b[1;4A");
-	assert.match(harness.notifications.at(-1)?.message ?? "", /before reordering/);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /pending depth change/);
 
 	harness.editor.handleInput("enter");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
@@ -1167,7 +1282,7 @@ test("a pending lane toggle freezes reorder until undone or saved", async () => 
 	]);
 });
 
-test("navigation follows the visual timeline while a lane draft is active", async () => {
+test("navigation stays spatial while a depth draft is active", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "steer one");
@@ -1176,10 +1291,9 @@ test("navigation follows the visual timeline while a lane draft is active", asyn
 
 	harness.editor.handleInput("alt-up");
 	assert.equal(harness.editor.getText(), "later two");
-	harness.editor.handleInput("\x1bt");
-	// Now previewed at the steering tail: previous is the native steer row.
+	harness.editor.handleInput("\x1b[1;3C");
 	harness.editor.handleInput("alt-up");
-	assert.equal(harness.editor.getText(), "steer one");
+	assert.equal(harness.editor.getText(), "later one");
 	harness.editor.handleInput("\x1b[1;3B");
 	assert.equal(harness.editor.getText(), "later two");
 });
@@ -2134,7 +2248,7 @@ test("queues Option+Enter submissions while stopped and sends on empty Enter", a
 	assert.equal(harness.editor.getText(), "");
 	assert.equal(harness.sent.length, 0);
 	const rendered = renderWidget(harness);
-	assert.match(rendered, /follow-ups \(1\) · paused/);
+	assert.match(rendered, /delivery plan \(1\) · paused/);
 	assert.match(rendered, /hello when stopped/);
 	assert.match(rendered, /send/);
 
@@ -2155,7 +2269,7 @@ test("parks control commands on stopped Option+Enter", async () => {
 	}
 
 	const rendered = renderWidget(harness);
-	assert.match(rendered, /follow-ups \(6\) · paused/);
+	assert.match(rendered, /delivery plan \(6\) · paused/);
 	assert.match(rendered, /\/compact keep the notes/);
 	assert.match(rendered, /\/reload/);
 	assert.match(rendered, /\/new/);
@@ -2176,7 +2290,7 @@ test("stopped Option+Enter /compact runs only on an explicit empty Enter", async
 	harness.editor.handleInput("alt-enter");
 	assert.equal(harness.editor.getText(), "");
 	assert.equal(harness.compactCalls.length, 0);
-	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+	assert.match(renderWidget(harness), /delivery plan \(1\) · paused/);
 
 	harness.editor.handleInput("enter");
 	assert.equal(harness.compactCalls.length, 1);
@@ -2191,7 +2305,7 @@ test("stopped Option+Enter /reload runs only on an explicit empty Enter", async 
 	harness.editor.setText("/reload");
 	harness.editor.handleInput("alt-enter");
 	assert.equal(harness.submitted.length, 0);
-	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+	assert.match(renderWidget(harness), /delivery plan \(1\) · paused/);
 
 	harness.editor.handleInput("enter");
 	await waitFor(() => harness.submitted.length === 1);
@@ -2207,7 +2321,7 @@ test("an input-event control command while stopped parks paused until empty Ente
 	// command row parks paused exactly like the editor-captured path.
 	await harness.emit("input", { source: "interactive", text: "/compact" });
 	assert.equal(harness.compactCalls.length, 0);
-	assert.match(renderWidget(harness), /follow-ups \(1\) · paused/);
+	assert.match(renderWidget(harness), /delivery plan \(1\) · paused/);
 
 	harness.editor.handleInput("enter");
 	assert.equal(harness.compactCalls.length, 1);
@@ -2262,7 +2376,7 @@ test("queues stopped Option+Enter skill and template commands, autoexpanding eac
 		harness.editor.handleInput("alt-enter");
 		assert.equal(harness.sent.length, 0);
 		const parked = renderWidget(harness);
-		assert.match(parked, /follow-ups \(2\) · paused/);
+		assert.match(parked, /delivery plan \(2\) · paused/);
 		assert.match(parked, /\/bro this paragraph/);
 		assert.match(parked, /\/do-less the parser/);
 
@@ -2336,7 +2450,7 @@ test("drain from idle pours every row into a single message that starts the run"
 		harness.editor.setText(text);
 		harness.editor.handleInput("alt-enter");
 	}
-	assert.match(renderWidget(harness), /follow-ups \(3\) · paused/);
+	assert.match(renderWidget(harness), /delivery plan \(3\) · paused/);
 
 	await harness.runCommand("queue-drain");
 	assert.deepEqual(harness.sent, [{ content: "one\ntwo\nthree", options: undefined }]);
