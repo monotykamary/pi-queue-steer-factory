@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A versioned conversation-queue bridge lets Pi Fabric reuse the queue's actual execution outline, inline row editor, and per-target retained queues. The normal queue and Fabric previews share one timeline renderer.
+
 ## 0.15.0 - 2026-09-05
 
 ### Changed

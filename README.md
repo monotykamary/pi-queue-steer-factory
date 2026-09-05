@@ -228,6 +228,12 @@ The queue publishes its state for peer extensions on the shared `pi.events` bus:
 
 Consumers: [pi-ledger](https://github.com/inloopstudio-team/pi-ledger) ≥ 0.6.0 holds back its no-credit engagement wizard while `pending > 0`, so a parked backlog no longer triggers the billing prompt, and re-offers it once the backlog drains without starting a run.
 
+### Fabric conversation previews
+
+The loaded extension also serves `queue-steer:conversation-queue:request:v1` on `pi.events`. Compatible Fabric conversation views acquire an isolated queue per participant, using this extension's actual `DeliveryQueue`, `QueueEditSession`, inline editor extraction, and shared execution-outline widget. No installation-path probing or second copy of the renderer is needed. Releases without this bridge fall back to Fabric's native Pi pending-message display.
+
+Fabric owns routing and delivery acknowledgement for these child views, not this extension's Main-session dispatcher. Sent rows stay visible until child delivery is observed and cannot be edited locally; parked rows support in-place editing. Closing a preview retains its session-owned queue, while a session reset releases it. Child queues never modify Main's queue, persist model-visible drafts, or execute Main-session command rows.
+
 ## Development
 
 ```bash

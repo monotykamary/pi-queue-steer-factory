@@ -7,7 +7,7 @@ import {
 	type KeybindingDefinitions,
 	type KeyId,
 } from "@earendil-works/pi-tui";
-import { nextRowKeys } from "../index.ts";
+import { nextRowKeys } from "../timeline-render.ts";
 
 const ALT_DOWN_INPUT = "\x1b[1;3B";
 const CTRL_DOWN_INPUT = "\x1b[1;5B";

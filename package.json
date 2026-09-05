@@ -24,6 +24,8 @@
   "homepage": "https://github.com/monotykamary/pi-queue-steer-factory",
   "files": [
     "index.ts",
+    "conversation-queue-bridge.ts",
+    "timeline-render.ts",
     "editor-render.ts",
     "fabric-peers.ts",
     "fabric-prewalk.ts",
