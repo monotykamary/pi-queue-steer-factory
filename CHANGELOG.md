@@ -190,3 +190,12 @@
 - Add inline row editing with stable queue positions and rollback on Escape.
 - Preserve image attachments, editor integrations, and failed dispatches.
 - Compose with existing Pi custom editors while removing nested editor chrome from the active row.
+## 0.16.2 - 2026-09-07
+
+### Added
+
+- A versioned headless controller/control bridge: import QueueController from pi-queue-steer-factory/headless without loading the TUI. Adds the wire protocol, RPC and control bridges, and async durable write-ahead persistence with queue identity high-water marks and committed position projection for edit sessions. Ships a prepack build with package exports (./headless, ./protocol, ./rpc, ./control).
+
+### Changed
+
+- Queue dispatch policy (head batching, lane holds, failed-run gating, compaction recovery) is extracted into a shared queue-policy module used by both the TUI extension and the headless bridge.
