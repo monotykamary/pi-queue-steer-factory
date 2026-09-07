@@ -9,6 +9,8 @@ Queue instructions while the agent works. Every row keeps its Pi delivery timing
 
 Move into any row to edit it. The selected row becomes the live Pi editor, with its cursor, wrapping, paste handling, autocomplete and custom-editor behaviour intact.
 
+For Rakazo, Pi RPC, or other headless owners, see the [versioned controller/control bridge](docs/headless.md). Import `QueueController` from `pi-queue-steer-factory/headless` without loading TUI. Async durable write-ahead persistence is supported.
+
 ## Demo
 
 ![Looping demonstration of steering and follow-up queues while Pi continues working](assets/pi-queue-steer-demo.gif)

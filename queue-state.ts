@@ -248,8 +248,21 @@ export class DeliveryQueue<TImage = unknown> {
 			restored.push(this.copy(item));
 		}
 		this.items = restored;
-		this.nextIdNumber = highestIdNumber + 1;
-		this.nextSequence = highestSequence + 1;
+		this.nextIdNumber = Math.max(this.nextIdNumber, highestIdNumber + 1);
+		this.nextSequence = Math.max(this.nextSequence, highestSequence + 1);
+	}
+
+	/** Persist high-water marks even when every row has been consumed. */
+	identity(): { nextIdNumber: number; nextSequence: number } {
+		return { nextIdNumber: this.nextIdNumber, nextSequence: this.nextSequence };
+	}
+
+	restoreIdentity(identity: { nextIdNumber: number; nextSequence: number }): void {
+		if (![identity.nextIdNumber, identity.nextSequence].every((n) => Number.isSafeInteger(n) && n > 0)) {
+			throw new Error("Invalid queue identity high-water marks");
+		}
+		this.nextIdNumber = Math.max(this.nextIdNumber, identity.nextIdNumber);
+		this.nextSequence = Math.max(this.nextSequence, identity.nextSequence);
 	}
 
 	clear(): void {
@@ -330,6 +343,17 @@ export class QueueEditSession<TImage = unknown> {
 		if (!queue.moveInLane(id, direction)) return false;
 		this.positionMoves.push({ id, direction });
 		return true;
+	}
+
+	/** Committed position projection for persistence, without consuming the rollback log. */
+	committedPositions(queue: DeliveryQueue<TImage>): QueuedMessage<TImage>[] {
+		const committed = new DeliveryQueue<TImage>();
+		committed.restore(queue.snapshot());
+		for (let index = this.positionMoves.length - 1; index >= 0; index -= 1) {
+			const move = this.positionMoves[index];
+			if (move) committed.moveInLane(move.id, move.direction === 1 ? -1 : 1);
+		}
+		return committed.snapshot();
 	}
 
 	/** Undo in-session reorders, newest first. Best-effort if rows left mid-session. */

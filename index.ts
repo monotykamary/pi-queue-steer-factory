@@ -210,6 +210,8 @@ function modelChoices(search: string | undefined, models: readonly Model<Api>[])
 		.sort((left, right) => left.localeCompare(right));
 }
 
+import { takeMessageBatch, shouldHoldFailedRun, canRecoverCompaction } from "./queue-policy.ts";
+
 export default function queueSteerExtension(pi: ExtensionAPI) {
 	const queue = new DeliveryQueue<ImageContent>();
 	// Peer-UI interop (pi-fabric focused conversations): serves versioned
@@ -295,7 +297,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			renderQueue(ctx);
 			return;
 		}
-		if (!paused) {
+		if (shouldHoldFailedRun(paused, queue.length > 0)) {
 			errorHold = true;
 			paused = true;
 		}
@@ -430,14 +432,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const takeLaneBatch = (lane: QueueLane): QueuedMessage<ImageContent>[] => {
 		const head = queue.peek();
 		if (paused || blockingActivity || head?.lane !== lane || laneIsHeld(lane)) return [];
-		// A lane switch, command, or row-level pause is a dispatch barrier: the
-		// batch stops there and nothing later in the timeline jumps ahead.
-		const isMessage = (item: QueuedMessage<ImageContent>) =>
-			itemCommand(item) === undefined && !item.paused;
-		if (queueModes()[lane] === "all") return queue.shiftWhile(lane, isMessage);
-		if (!isMessage(head)) return [];
-		const item = queue.shift();
-		return item ? [item] : [];
+		return takeMessageBatch(queue, editSession, queueModes(), lane);
 	};
 
 	const deliverBatchToNativeQueue = async (
@@ -821,7 +816,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			// A concluded overflow-recovery compaction closes the failed run's
 			// recovery window without a healthy agent_end ever arriving; release
 			// the error hold unless that recovery itself failed.
-			if (errorHold && compactionIsOverflowRecovery && !compactionRecoveryFailed) resumeQueue();
+			if (canRecoverCompaction(errorHold, compactionIsOverflowRecovery, compactionRecoveryFailed)) resumeQueue();
 			compactionRecoveryFailed = false;
 			compactionIsOverflowRecovery = false;
 			const current = activeContext ?? ctx;

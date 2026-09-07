@@ -36,12 +36,22 @@
     "LICENSE",
     "CHANGELOG.md",
     "docs/validation.md",
-    "assets/pi-queue-steer-demo.gif"
+    "assets/pi-queue-steer-demo.gif",
+    "headless.ts",
+    "protocol.ts",
+    "queue-policy.ts",
+    "rpc-bridge.ts",
+    "control-bridge.ts",
+    "docs/headless.md",
+    "dist"
   ],
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "ci": "npm run check && npm test"
+    "ci": "npm run check && npm test",
+    "build": "tsc -p tsconfig.headless.json",
+    "prepack": "npm run build",
+    "pretest": "npm run build"
   },
   "pi": {
     "extensions": [
@@ -61,5 +71,29 @@
     "@types/node": "24.12.4",
     "tsx": "4.22.1",
     "typescript": "5.9.3"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./headless": {
+      "types": "./dist/headless.d.ts",
+      "import": "./dist/headless.js",
+      "default": "./dist/headless.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js",
+      "default": "./dist/protocol.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc-bridge.d.ts",
+      "import": "./dist/rpc-bridge.js",
+      "default": "./dist/rpc-bridge.js"
+    },
+    "./control": {
+      "types": "./dist/control-bridge.d.ts",
+      "import": "./dist/control-bridge.js",
+      "default": "./dist/control-bridge.js"
+    },
+    "./*.ts": "./*.ts"
   }
 }

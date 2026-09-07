@@ -8,7 +8,6 @@ import {
 	type KeyId,
 } from "@earendil-works/pi-tui";
 import {
-	parseQueuedCommand,
 	type DeliveryQueue,
 	type QueueEditSession,
 	type QueuedCommand,
@@ -30,7 +29,8 @@ export const TOGGLE_LANE_KEY = "alt+t";
 export const REORDER_UP_KEY = "alt+shift+up";
 export const REORDER_DOWN_KEY = "alt+shift+down";
 
-export type QueueModes = Record<QueueLane, "all" | "one-at-a-time">;
+import { headDeliveryBatch, itemCommand, laneIsHeld, type QueueModes } from "./queue-policy.ts";
+export { headDeliveryBatch, itemCommand, laneIsHeld, type QueueModes } from "./queue-policy.ts";
 
 export function laneLabel(lane: QueueLane): string {
 	return lane === "steer" ? "steer" : "follow-up";
@@ -79,38 +79,6 @@ export interface TimelineItem extends QueuedMessage<ImageContent> {
 	/** True when the current edit session drafted a pause change that differs from the row's committed hold. */
 	rowPauseDrafted: boolean;
 	command: QueuedCommand | undefined;
-}
-
-/** A row with image attachments stays a message so attachments are never discarded. */
-export function itemCommand(item: Pick<QueuedMessage<ImageContent>, "text" | "images">): QueuedCommand | undefined {
-	return item.images.length === 0 ? parseQueuedCommand(item.text) : undefined;
-}
-
-/** Contiguous head batch: a lane switch, command, or paused row ends it. */
-export function headDeliveryBatch(timeline: readonly QueuedMessage<ImageContent>[]): QueuedMessage<ImageContent>[] {
-	const head = timeline[0];
-	if (!head) return [];
-	const batch = [head];
-	if (head.paused || itemCommand(head)) return batch;
-	for (const item of timeline.slice(1)) {
-		if (item.lane !== head.lane || item.paused || itemCommand(item)) break;
-		batch.push(item);
-	}
-	return batch;
-}
-
-/** Whether an editing session holds the lane's dispatchable head back. */
-export function laneIsHeld(
-	queue: DeliveryQueue<ImageContent>,
-	editSession: QueueEditSession<ImageContent> | undefined,
-	modes: QueueModes,
-	lane: QueueLane,
-): boolean {
-	if (!editSession) return false;
-	const batch = headDeliveryBatch(queue.snapshot());
-	if (batch[0]?.lane !== lane) return false;
-	if (modes[lane] === "one-at-a-time") return editSession.touches(batch[0]!.id);
-	return batch.some((item) => editSession.touches(item.id));
 }
 
 /**

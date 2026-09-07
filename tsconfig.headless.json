@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist"
+  },
+  "include": [],
+  "files": ["headless.ts", "protocol.ts", "rpc-bridge.ts", "control-bridge.ts"]
+}
