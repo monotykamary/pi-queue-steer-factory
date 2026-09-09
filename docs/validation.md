@@ -25,7 +25,9 @@ npm run ci
 
 The suite covers global steering/follow-up interleaving, execution-outline rendering, in-place Option+Left/Right depth changes and word-navigation compatibility, queue/edit invariants, command classification, images, one-at-a-time and barrier-bounded all-mode delivery, synchronous partial handoff restoration, non-TUI pass-through, prompt and Skill expansion, manual compaction success/failure, automatic overflow compaction, retry ordering, repeated reload restoration, and compaction/native-input ordering.
 
-Latest result with Pi 0.85.0: 188 tests passed.
+Latest result with Pi 0.85.1: 225 tests passed (`npm run ci`). Current-run insertion preserves leading steering FIFO, future-run children, recency and images. Mixed-depth reorders preserve committed checkpoints and rollback across text, lane, pause and removal drafts; headless reorder also works before saving a depth edit.
+
+The real Pi 0.85.1 tmux run passed with this working tree. `leading-steer-outline.txt` shows a newly typed steer above a previously queued follow-up. `seamless-edit-preview.txt` and `seamless-edit-saved.txt` capture text editing, indent/outdent, cross-lane up/down movement and row navigation before one final Enter. `seamless-provider-calls.jsonl` confirms the saved rows execute in visible order. Artifacts for this run: `/tmp/queue-steer-tui`.
 
 ## Factory control pipeline
 
@@ -49,7 +51,7 @@ One empty-composer `Enter` replaced the session, selected the model, armed prewa
 
 ## Real TUI evidence
 
-`test/tui-evidence.sh` starts the real Pi TUI under tmux with a deterministic faux provider (Pi 0.85.0 in the latest run). It uses actual terminal key sequences, public compaction lifecycle events, public provider registration, actual runtime reloads, and Pi's real native compaction queue.
+`test/tui-evidence.sh` starts the real Pi TUI under tmux with a deterministic faux provider (Pi 0.85.1 in the latest run). It uses actual terminal key sequences, public compaction lifecycle events, public provider registration, actual runtime reloads, and Pi's real native compaction queue.
 
 Run:
 
@@ -59,7 +61,7 @@ Run:
 
 The output directory contains plain terminal captures, provider-call logs, lifecycle-event logs, and runtime-initialization logs. `depth-preview.txt` proves a physical Option+Right indents a selected queued row in place; `interleaved-timeline.txt` then shows follow-up → steering → follow-up inside one delivery plan, with the blue steering row between two yellow roots. `leading-steer-outline.txt` proves the inverse shape: leading steering nests under the implicit current run while the following queue remains a root. Their provider-call logs verify both sequences reached successive contexts exactly once in FIFO order. Run the harness immediately before review so `summary.txt` records the exact Pi version, commit and working-tree state under test. A release evidence run should report `working tree: clean`.
 
-The latest complete run reported:
+An earlier release run reported:
 
 ```text
 pi: 0.84.1

@@ -230,7 +230,7 @@ async function seedSession(harness: IntegrationHarness): Promise<void> {
 	await harness.session.prompt("seed two");
 }
 
-test("real AgentSession interleaves follow-up and steering rows in enqueue order", async () => {
+test("real AgentSession steers current work ahead of previously queued runs", async () => {
 	const harness = await createIntegrationHarness();
 	try {
 		await seedSession(harness);
@@ -246,7 +246,7 @@ test("real AgentSession interleaves follow-up and steering rows in enqueue order
 		await within(activeStarted, () => "interleaving agent did not start");
 
 		await harness.session.prompt("queued turn one", { streamingBehavior: "followUp" });
-		await harness.session.prompt("steer inside turn one", { streamingBehavior: "steer" });
+		await harness.session.prompt("steer current work", { streamingBehavior: "steer" });
 		await harness.session.prompt("queued turn two", { streamingBehavior: "followUp" });
 		const completed = nextAgentRunForUser(harness.session, "queued turn two");
 
@@ -256,8 +256,8 @@ test("real AgentSession interleaves follow-up and steering rows in enqueue order
 
 		assert.deepEqual(userTexts(harness.session).slice(2), [
 			"active prompt",
+			"steer current work",
 			"queued turn one",
-			"steer inside turn one",
 			"queued turn two",
 		]);
 		assert.equal(harness.session.getSteeringMessages().length, 0);

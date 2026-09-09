@@ -73,6 +73,24 @@ test("Escape rolls back multi-row text, removal, depth, hold and position drafts
 	assert.deepEqual(h.controller.snapshot().rows, original);
 });
 
+test("reorder crosses lanes during depth edits without saving and persists only on save", async () => {
+	const h = harness();
+	const a = await h.enqueue("a");
+	const b = await h.enqueue("b", "followUp");
+	const c = await h.enqueue("c", "followUp");
+	const original = h.controller.checkpoint().rows;
+	await h.mutate({ type: "edit-begin", id: c });
+	await h.mutate({ type: "edit-patch", patch: { text: "edited c", lane: "steer" } });
+	await h.mutate({ type: "reorder", id: c, direction: -1 });
+	await h.mutate({ type: "reorder", id: c, direction: -1 });
+	assert.deepEqual(h.controller.checkpoint().rows, original);
+	await h.mutate({ type: "edit-save" });
+	assert.deepEqual(h.controller.checkpoint().rows.map((r) => [r.id, r.lane]), [[c, "steer"], [a, "steer"], [b, "followUp"]]);
+	assert.equal(h.controller.checkpoint().rows[0]?.text, "edited c");
+	await h.mutate({ type: "reorder", id: b, direction: -1 });
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [c, b, a]);
+});
+
 test("strict FIFO, all-mode edited batch pinning, command and row-pause barriers", async () => {
 	const h = harness({}, true);
 	const a = await h.enqueue("a");

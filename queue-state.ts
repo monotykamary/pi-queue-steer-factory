@@ -89,6 +89,17 @@ export class DeliveryQueue<TImage = unknown> {
 		return this.copy(item);
 	}
 
+	/** Insert interactive steering into the current run, before future run roots. */
+	enqueueSteer(text: string, images: readonly TImage[] = []): QueuedMessage<TImage> {
+		const item = this.enqueue("steer", text, images);
+		const firstRoot = this.items.findIndex((candidate) => candidate.lane === "followUp");
+		if (firstRoot !== -1) {
+			const inserted = this.items.pop()!;
+			this.items.splice(firstRoot, 0, inserted);
+		}
+		return item;
+	}
+
 	prepend(item: QueuedMessage<TImage>): void {
 		this.items.unshift(this.copy(item));
 	}
@@ -136,6 +147,25 @@ export class DeliveryQueue<TImage = unknown> {
 		this.items[fromIndex] = neighbour;
 		this.items[toIndex] = moved;
 		return true;
+	}
+
+	/** Swap exact row identities; also used to undo moves despite lane changes. */
+	swapRows(id: string, neighbourId: string): boolean {
+		const from = this.items.findIndex((item) => item.id === id);
+		const to = this.items.findIndex((item) => item.id === neighbourId);
+		const item = this.items[from];
+		const neighbour = this.items[to];
+		if (!item || !neighbour || from === to) return false;
+		this.items[from] = neighbour;
+		this.items[to] = item;
+		return true;
+	}
+
+	/** Move one visible row up or down without changing its delivery depth. */
+	moveInTimeline(id: string, direction: -1 | 1): boolean {
+		const index = this.items.findIndex((item) => item.id === id);
+		const neighbour = index === -1 ? undefined : this.items[index + direction];
+		return neighbour ? this.swapRows(id, neighbour.id) : false;
 	}
 
 	/** Change a row's delivery depth without changing its timeline position. */
@@ -296,7 +326,7 @@ export interface EditCommitResult {
 /** Rollback-safe drafts spanning rows from either delivery lane. */
 export class QueueEditSession<TImage = unknown> {
 	private readonly drafts = new Map<string, QueuedMessageDraft<TImage>>();
-	private readonly positionMoves: { id: string; direction: -1 | 1 }[] = [];
+	private readonly positionMoves: { id: string; neighbourId: string }[] = [];
 	private currentId: string;
 	readonly composerDraft: string;
 
@@ -335,13 +365,16 @@ export class QueueEditSession<TImage = unknown> {
 	}
 
 	/**
-	 * Move a row within its lane immediately, recording the inverse so cancel
+	 * Move a row in the visible timeline immediately, recording the inverse so cancel
 	 * restores positions. Position changes apply to dispatch order at once;
 	 * Escape replays the inverses newest-first.
 	 */
 	moveRow(queue: DeliveryQueue<TImage>, id: string, direction: -1 | 1): boolean {
-		if (!queue.moveInLane(id, direction)) return false;
-		this.positionMoves.push({ id, direction });
+		const rows = queue.snapshot();
+		const index = rows.findIndex((item) => item.id === id);
+		const neighbour = index === -1 ? undefined : rows[index + direction];
+		if (!neighbour || !queue.swapRows(id, neighbour.id)) return false;
+		this.positionMoves.push({ id, neighbourId: neighbour.id });
 		return true;
 	}
 
@@ -351,7 +384,7 @@ export class QueueEditSession<TImage = unknown> {
 		committed.restore(queue.snapshot());
 		for (let index = this.positionMoves.length - 1; index >= 0; index -= 1) {
 			const move = this.positionMoves[index];
-			if (move) committed.moveInLane(move.id, move.direction === 1 ? -1 : 1);
+			if (move) committed.swapRows(move.id, move.neighbourId);
 		}
 		return committed.snapshot();
 	}
@@ -360,7 +393,7 @@ export class QueueEditSession<TImage = unknown> {
 	rollbackPositions(queue: DeliveryQueue<TImage>): void {
 		for (let index = this.positionMoves.length - 1; index >= 0; index -= 1) {
 			const move = this.positionMoves[index];
-			if (move) queue.moveInLane(move.id, move.direction === 1 ? -1 : 1);
+			if (move) queue.swapRows(move.id, move.neighbourId);
 		}
 		this.positionMoves.length = 0;
 	}

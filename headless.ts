@@ -189,11 +189,11 @@ export class QueueController {
 			case "lane": this.row(op.id); this.queue.setLane(op.id, op.lane); break;
 			case "hold": this.row(op.id); this.queue.setPaused(op.id, op.paused); break;
 			case "reorder": {
-				const row = this.row(op.id);
+				this.row(op.id);
 				if (this.edit) {
-					if (this.edit.selectedId !== op.id || this.edit.laneFor(op.id) !== row.lane) throw new Error("Select row and save pending depth change before reorder");
+					if (this.edit.selectedId !== op.id) throw new Error("Select row before reorder");
 					this.edit.moveRow(this.queue, op.id, op.direction);
-				} else this.queue.moveInLane(op.id, op.direction);
+				} else this.queue.moveInTimeline(op.id, op.direction);
 				break;
 			}
 			case "cancel-gate": {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0 - 2026-09-09
+
+### Fixed
+
+- New interactive steering targets the current run, after its existing steers and before future queued runs. Explicit future-run children and guarded plain-Enter session controls retain their planned ordering.
+- Depth changes, text edits, navigation and up/down reordering now compose without intermediate saves. Reordering follows adjacent visible rows across lanes; one final Enter saves the session and Escape rolls it all back. Headless editing uses the same spatial movement.
+
 ## 0.16.0 - 2026-09-05
 
 ### Added

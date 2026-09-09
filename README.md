@@ -34,7 +34,7 @@ pi install npm:pi-fabric@0.83.0
 The GitHub package is also installable directly:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.16.0
+pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.17.0
 ```
 
 Then start a new Pi session or run `/reload`.
@@ -45,7 +45,7 @@ The extension follows your configured Pi action bindings. These are the default 
 
 | Context | Key | Action |
 |---|---|---|
-| Agent working | `Enter` | Append visible steering; it runs at its next safe turn boundary after earlier rows |
+| Agent working | `Enter` | Steer the current run; insert after its existing steers, ahead of future queued runs |
 | Agent working | `Option+Enter` | Append a visible follow-up; it runs after earlier rows and the active run |
 | Queue visible | `Option+Up` | Select the most recently queued row |
 | Editing a row | `Option+Up` | Keep the current draft and move to the previous visual row |
@@ -56,7 +56,7 @@ The extension follows your configured Pi action bindings. These are the default 
 | Editing a row | `Option+Left` | Outdent the row into a follow-up that starts the next run; its timeline position does not change |
 | Editing a row | `Option+T` | Toggle the same depth as a fallback when a terminal cannot distinguish Option+Arrow |
 | Editing a row | `Option+P` | Pause or resume the selected row where it sits; a paused row stops dispatch at its position until resumed |
-| Editing a row | `Option+Shift+Up` / `Option+Shift+Down` | Reorder the selected row within its lane; positions apply immediately and roll back on `Escape` |
+| Editing a row | `Option+Shift+Up` / `Option+Shift+Down` | Move the selected row one position in the timeline, across lanes too; works during unsaved depth edits |
 | Editing a row | `Enter` or `Option+Enter` | Save all row edits, including explicit indent/outdent drafts |
 | Editing a row | `Escape` | Cancel the session and roll back all unsaved row edits |
 | Empty composer, follow-up at the timeline head | `Enter` | Promote that next follow-up to steering now |
@@ -106,10 +106,11 @@ The extension keeps Pi’s 2 delivery classes inside one ordered timeline:
 - later rows never overtake the head because they use the other delivery class
 - yellow follow-ups stay at the root and blue steering rows indent beneath the run they will join
 - reordered rows keep their stable IDs, text drafts and attachments
-- reordering waits while an indent/outdent draft is pending; saving the depth change keeps the row in its existing timeline slot
+- change depth, edit text, reorder up/down and switch rows in one editing session, with no intermediate saves; one final `Enter` saves everything and `Escape` rolls it all back
+- new interactive steers join the leading current-run segment before the first future follow-up root; existing rows keep their relative order
 - Pi’s `one-at-a-time` and `all` settings still apply per lane, but an `all` batch stops at the next lane switch, command, or paused row
 
-This makes both directions composable. Queueing `follow-up A → steer A → follow-up B` starts A after the current run, injects the steering into A at its next turn boundary, then starts B only after that run settles. While an agent is working, enter that sequence with `Option+Enter`, `Enter`, then `Option+Enter`; queueing steering before a follow-up keeps the inverse relationship just as strictly.
+To steer a future queued run instead, queue its child with `Option+Enter`, select it with `Option+Up`, then indent with `Option+Right`. Reorder it beneath the desired run without saving first. A plan of `follow-up A → steer A → follow-up B` starts A after the current run, steers A at its next turn boundary, then starts B after A settles. Plain-Enter `/compact` and `/new` retain their safe tail placement behind earlier rows; explicit headless enqueue also remains append-only.
 
 The extension hands the timeline head back to Pi only when that row's delivery boundary arrives. Rows remain visible and editable before that point, and Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
 

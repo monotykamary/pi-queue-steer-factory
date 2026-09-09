@@ -222,6 +222,46 @@ test("session reorders roll back in reverse and keep row identity", () => {
 	assert.equal(queue.get(third.id)?.text, "third");
 });
 
+test("current-run insertion preserves future children, recency and attachments", () => {
+	const q = new DeliveryQueue<string>();
+	const a = q.enqueueSteer("first");
+	const b = q.enqueue("followUp", "root");
+	const c = q.enqueue("steer", "future child");
+	const d = q.enqueue("followUp", "tail");
+	const images = ["image"];
+	const e = q.enqueueSteer("second", images);
+	images.push("not attached");
+	assert.deepEqual(q.snapshot().map((r) => r.id), [a.id, e.id, b.id, c.id, d.id]);
+	assert.deepEqual(q.get(e.id)?.images, ["image"]);
+	assert.equal(q.mostRecentId(), e.id);
+	assert.equal(q.moveInTimeline("missing", 1), false);
+	assert.equal(q.moveInTimeline(a.id, -1), false);
+	assert.equal(q.moveInTimeline(d.id, 1), false);
+});
+
+test("mixed-depth moves preserve committed snapshots despite arrivals and departures", () => {
+	const q = new DeliveryQueue<string>();
+	const a = q.enqueue("steer", "head");
+	const b = q.enqueue("followUp", "root", ["image"]);
+	const c = q.enqueue("steer", "child");
+	const original = q.snapshot();
+	const e = new QueueEditSession(c, "composer");
+	e.setLane(c.id, "followUp");
+	assert.equal(e.moveRow(q, c.id, -1), true);
+	e.select(b, "child edited");
+	e.setLane(b.id, "steer");
+	e.togglePaused(b.id);
+	e.toggleRemoved(b.id);
+	assert.equal(e.moveRow(q, b.id, -1), true);
+	assert.equal(e.moveRow(q, b.id, -1), true);
+	assert.deepEqual(e.committedPositions(q), original);
+	assert.deepEqual(e.committedPositions(q), original);
+	const arrival = q.enqueue("followUp", "new arrival");
+	q.remove(a.id);
+	e.rollbackPositions(q);
+	assert.deepEqual(q.snapshot(), [...original.filter((r) => r.id !== a.id), arrival]);
+});
+
 class MockEditor {
 	private text = "";
 	private autocompleteVisible = false;
@@ -494,6 +534,14 @@ async function enqueue(
 	});
 }
 
+/** Place an explicit child under the last queued run, rather than steering current work. */
+async function enqueueFutureSteer(harness: ReturnType<typeof createHarness>, text: string): Promise<void> {
+	await enqueue(harness, "followUp", text);
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("\x1b[1;3C");
+	harness.editor.handleInput("enter");
+}
+
 function renderWidget(harness: ReturnType<typeof createHarness>, width = 76): string {
 	const widgetFactory = harness.widget as (tui: unknown, theme: any) => { render(width: number): string[] };
 	const component = widgetFactory({}, { fg: (_color: string, text: string) => text });
@@ -512,7 +560,7 @@ test("renders one execution outline with steering nested under queued runs", asy
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "write the README");
-	await enqueue(harness, "steer", "check the API next");
+	await enqueueFutureSteer(harness, "check the API next");
 	await enqueue(harness, "followUp", "then update the tests");
 
 	const rendered = renderWidget(harness);
@@ -623,7 +671,7 @@ test("dispatches follow-up then steering then follow-up in timeline order", asyn
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "followUp", "queued turn one");
-	await enqueue(harness, "steer", "steer inside turn one");
+	await enqueueFutureSteer(harness, "steer inside turn one");
 	await enqueue(harness, "followUp", "queued turn two");
 
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
@@ -644,7 +692,7 @@ test("dispatches steering then follow-up then steering in timeline order", async
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "steer current run");
 	await enqueue(harness, "followUp", "queued next turn");
-	await enqueue(harness, "steer", "steer inside next turn");
+	await enqueueFutureSteer(harness, "steer inside next turn");
 
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
@@ -776,7 +824,7 @@ test("all mode batches only the contiguous head lane segment", async () => {
 		await harness.emit("session_start");
 		await enqueue(harness, "followUp", "follow-up one");
 		await enqueue(harness, "followUp", "follow-up two");
-		await enqueue(harness, "steer", "steer inside");
+		await enqueueFutureSteer(harness, "steer inside");
 		await enqueue(harness, "followUp", "follow-up three");
 
 		await harness.emit("agent_end");
@@ -825,7 +873,7 @@ test("all mode does not let an edit beyond a lane switch pin the head segment", 
 		await harness.emit("session_start");
 		await enqueue(harness, "steer", "head steer");
 		await enqueue(harness, "followUp", "lane boundary");
-		await enqueue(harness, "steer", "later steer being edited");
+		await enqueueFutureSteer(harness, "later steer being edited");
 
 		harness.editor.handleInput("alt-up");
 		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
@@ -1262,7 +1310,7 @@ test("Escape restores the original lane order after an in-session reorder", asyn
 	assert.deepEqual(harness.sent[0], { content: "first", options: { deliverAs: "steer" } });
 });
 
-test("a pending depth change freezes reorder until undone or saved", async () => {
+test("a pending depth change allows reorder without an intermediate save", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "steer one");
@@ -1271,16 +1319,72 @@ test("a pending depth change freezes reorder until undone or saved", async () =>
 	harness.editor.handleInput("alt-up");
 	harness.editor.handleInput("\x1b[1;3C");
 	harness.editor.handleInput("\x1b[1;4A");
-	assert.match(harness.notifications.at(-1)?.message ?? "", /pending depth change/);
+	assert.ok(renderWidget(harness).indexOf("promote me") < renderWidget(harness).indexOf("steer one"));
+	assert.equal(harness.notifications.length, 0);
 
 	harness.editor.handleInput("enter");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.deepEqual(harness.sent.map((item) => [item.content, item.options]), [
-		["steer one", { deliverAs: "steer" }],
 		["promote me", { deliverAs: "steer" }],
+		["steer one", { deliverAs: "steer" }],
 	]);
 });
+
+test("interactive steering targets current work ahead of queued roots", async () => {
+	const h = createHarness();
+	await h.emit("session_start");
+	await enqueue(h, "followUp", "future root");
+	await enqueueFutureSteer(h, "future child");
+	await enqueue(h, "followUp", "future tail");
+	const image: ImageContent = { type: "image", data: "AA==", mimeType: "image/png" };
+	await h.emit("input", { source: "interactive", text: "current first", images: [image], streamingBehavior: "steer" });
+	await enqueue(h, "steer", "current second");
+	h.editor.handleInput("alt-up");
+	assert.equal(h.editor.getText(), "current second");
+	h.editor.handleInput("escape");
+	const rendered = renderWidget(h);
+	assert.ok(rendered.indexOf("current first") < rendered.indexOf("current second"));
+	assert.ok(rendered.indexOf("current second") < rendered.indexOf("future root"));
+	assert.match(rendered, /• current run/);
+	for (let i = 0; i < 3; i++) await h.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(h.sent, [
+		{ content: [{ type: "text", text: "current first" }, image], options: { deliverAs: "steer" } },
+		{ content: "current second", options: { deliverAs: "steer" } },
+	]);
+	assert.match(renderWidget(h), /future root/);
+});
+
+for (const finish of ["enter", "escape"]) {
+	test(`depth, text, navigation and cross-lane moves compose before one ${finish}`, async () => {
+		const h = createHarness();
+		await h.emit("session_start");
+		await enqueue(h, "steer", "current");
+		await enqueue(h, "followUp", "root");
+		await enqueue(h, "followUp", "tail");
+		h.editor.setText("composer");
+		h.editor.handleInput("alt-up");
+		h.editor.setText("tail edited");
+		for (const key of ["\x1b[1;3C", "\x1b[1;4A", "\x1b[1;3D", "\x1b[1;4A", "\x1b[1;4B", "\x1b[1;3B"]) h.editor.handleInput(key);
+		assert.equal(h.editor.getText(), "root");
+		h.editor.setText("root edited");
+		for (const key of ["\x1b[1;3C", "\x1b[1;4A", "\x1b[1;4A"]) h.editor.handleInput(key);
+		assert.equal(h.notifications.length, 0);
+		await h.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+		assert.equal(h.sent.length, 0);
+		h.editor.handleInput(finish);
+		assert.equal(h.editor.getText(), "composer");
+		const rendered = renderWidget(h);
+		if (finish === "enter") {
+			assert.ok(rendered.indexOf("root edited") < rendered.lastIndexOf("current"));
+			assert.ok(rendered.lastIndexOf("current") < rendered.indexOf("tail edited"));
+		} else {
+			assert.doesNotMatch(rendered, /edited/);
+			assert.ok(rendered.lastIndexOf("current") < rendered.indexOf("○ root"));
+			assert.ok(rendered.indexOf("○ root") < rendered.indexOf("○ tail"));
+		}
+	});
+}
 
 test("navigation stays spatial while a depth draft is active", async () => {
 	const harness = createHarness();
@@ -1337,7 +1441,7 @@ test("expands queued prompt templates and short Agent Skill commands at delivery
 			images: [image],
 			streamingBehavior: "followUp",
 		});
-		await enqueue(harness, "steer", "/bro make this clearer");
+		await enqueueFutureSteer(harness, "/bro make this clearer");
 
 		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 		assert.equal(harness.sent.length, 0);
@@ -2430,7 +2534,7 @@ test("drain command steers every queued message into a live run in timeline orde
 
 	await harness.runCommand("queue-drain");
 	assert.deepEqual(harness.sent, [{
-		content: "later one\nsteer one\nsteer two\nlater two",
+		content: "steer one\nsteer two\nlater one\nlater two",
 		options: { deliverAs: "steer" },
 	}]);
 	const rendered = renderWidget(harness);
@@ -2515,9 +2619,9 @@ test("a send failure during a drain restores every interleaved row and pauses", 
 	assert.equal(harness.sent.length, 0);
 	assert.equal(harness.appendedEntries.length, 0);
 	const rendered = renderWidget(harness);
-	assert.ok(rendered.indexOf("one") < rendered.indexOf("two"));
-	assert.ok(rendered.indexOf("two") < rendered.indexOf("/compact later"));
-	assert.ok(rendered.indexOf("/compact later") < rendered.indexOf("three"));
+	assert.ok(rendered.indexOf("two") < rendered.indexOf("three"));
+	assert.ok(rendered.indexOf("three") < rendered.indexOf("one"));
+	assert.ok(rendered.indexOf("one") < rendered.indexOf("/compact later"));
 	assert.match(rendered, /paused/);
 	assert.match(
 		harness.notifications.at(-1)?.message ?? "",

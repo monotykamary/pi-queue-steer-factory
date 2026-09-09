@@ -347,22 +347,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const laneIsHeld = (lane: QueueLane): boolean =>
 		laneIsHeldShared(queue, editSession, queueModes(), lane);
 
-	/**
-	 * Reorder the selected row within its committed lane. Position changes
-	 * apply to dispatch order at once; the session records inverses so Escape
-	 * restores positions. A pending depth change freezes position until saved
-	 * or undone, since lane-neighbour reordering still follows committed state.
-	 */
+	/** Reorder spatially, including during depth edits; Escape restores positions. */
 	const reorderSelectedRow = (ctx: ExtensionContext, direction: -1 | 1): void => {
 		const session = editSession;
 		if (!session) return;
 		const item = queue.get(session.selectedId);
 		if (!item) return;
-		const draftLane = session.laneFor(item.id);
-		if (draftLane && draftLane !== item.lane) {
-			ctx.ui.notify(`Save or undo the pending depth change (${OUTDENT_ROW_KEY}/${INDENT_ROW_KEY}) before reordering this row`, "info");
-			return;
-		}
 		if (session.moveRow(queue, item.id, direction)) renderQueue(ctx);
 	};
 
@@ -1017,8 +1007,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		// Navigate the visual timeline so movement matches what is on screen
-		// even while a lane draft previews a row inside the other box.
+		// Navigate the visible outline, including unsaved depth and position edits.
 		const session = editSession;
 		const ordered = timelineItems();
 		const currentText = ctx.ui.getEditorText();
@@ -1480,7 +1469,8 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 
 		const command = parseQueuedCommand(event.text);
 		if (event.streamingBehavior === "steer" || event.streamingBehavior === "followUp") {
-			queue.enqueue(event.streamingBehavior, event.text, event.images);
+			if (event.streamingBehavior === "steer") queue.enqueueSteer(event.text, event.images);
+			else queue.enqueue("followUp", event.text, event.images);
 			resumeQueue();
 			renderQueue(ctx);
 			return { action: "handled" };

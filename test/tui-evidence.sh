@@ -269,8 +269,8 @@ echo "Running leading-steer outline scenario"
 start_pi 100000 one-at-a-time
 send_text "BLOCK:outline-leading"
 wait_file "$STATE_DIR/provider-calls.jsonl" "BLOCK:outline-leading"
-queue_steer "steer current work"
 queue_follow_up "queued root after steer"
+queue_steer "steer current work"
 wait_screen "queued root after steer"
 capture_plain "leading-steer-outline"
 if ! grep -Fq "• current run" "$ARTIFACT_DIR/leading-steer-outline.txt" \
@@ -289,6 +289,47 @@ leading_context_count=$(
 )
 if (( leading_context_count != 1 )); then
 	echo "Leading steer and following queue did not execute exactly once in FIFO order" >&2
+	exit 1
+fi
+
+# Edit, change depth and reorder across lanes before one final save.
+echo "Running seamless queue-edit scenario"
+start_pi 100000 one-at-a-time
+send_text "BLOCK:seamless"
+wait_file "$STATE_DIR/provider-calls.jsonl" "BLOCK:seamless"
+queue_follow_up "gesture root"
+queue_follow_up "gesture tail"
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3A'
+tmux -S "$SOCKET" send-keys -t "$PANE" C-e
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- " edited"
+# Indent, move above the root, outdent, move back down, and indent again.
+for key in $'\e[1;3C' $'\e[1;4A' $'\e[1;3D' $'\e[1;4B' $'\e[1;3C'; do
+	tmux -S "$SOCKET" send-keys -t "$PANE" -l -- "$key"
+	sleep 0.1
+done
+# Switch rows and back, preserving the edited text without Enter.
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3A'
+tmux -S "$SOCKET" send-keys -t "$PANE" -l -- $'\e[1;3B'
+wait_screen "gesture tail edited"
+capture_plain "seamless-edit-preview"
+if grep -Fq "before reordering" "$ARTIFACT_DIR/seamless-edit-preview.txt"; then
+	echo "Depth edit blocked spatial movement" >&2
+	exit 1
+fi
+tmux -S "$SOCKET" send-keys -t "$PANE" Enter
+wait_screen "follow-up starts a run"
+capture_plain "seamless-edit-saved"
+root_line=$(grep -nF "│ ○ gesture root" "$ARTIFACT_DIR/seamless-edit-saved.txt" | tail -1 | cut -d: -f1)
+tail_line=$(grep -nF "│   ↳ » gesture tail edited" "$ARTIFACT_DIR/seamless-edit-saved.txt" | tail -1 | cut -d: -f1)
+if [[ -z "$root_line" || -z "$tail_line" ]] || (( root_line >= tail_line )); then
+	echo "Combined editing gesture lost row position, depth or text" >&2
+	exit 1
+fi
+touch "$STATE_DIR/gate-seamless"
+wait_screen "FAUX RESPONSE: gesture tail edited" 30
+cp "$STATE_DIR/provider-calls.jsonl" "$ARTIFACT_DIR/seamless-provider-calls.jsonl"
+if ! grep -Fq '"userPrefixes":["BLOCK:seamless","gesture root","gesture tail edited"]' "$ARTIFACT_DIR/seamless-provider-calls.jsonl"; then
+	echo "Combined edit did not dispatch in visible order" >&2
 	exit 1
 fi
 
@@ -325,6 +366,6 @@ fi
 	echo "manual events: $(tr '\n' ' ' < "$ARTIFACT_DIR/manual-events.jsonl")"
 	echo "overflow events: $(tr '\n' ' ' < "$ARTIFACT_DIR/overflow-events.jsonl")"
 	echo "runtime initializations across two queued reloads: $(wc -l < "$ARTIFACT_DIR/reload-runtime-inits.log")"
-	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, depth-preview, interleaved-timeline, leading-steer-outline, all-mode"
+	echo "captures: abort-paused, manual-reload-resources, native-before-command, automatic-overflow, depth-preview, interleaved-timeline, leading-steer-outline, seamless-edit-preview, seamless-edit-saved, all-mode"
 } > "$ARTIFACT_DIR/summary.txt"
 cat "$ARTIFACT_DIR/summary.txt"
