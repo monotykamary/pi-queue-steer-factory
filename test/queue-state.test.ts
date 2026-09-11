@@ -320,6 +320,7 @@ function createHarness(options: {
 	selectResult?: string;
 	setModelResult?: boolean | Error;
 	newSession?: () => Promise<{ cancelled: boolean }>;
+	asyncSend?: boolean;
 } = {}) {
 	type Handler = (event: any, context: any) => any;
 	const handlers = new Map<string, Handler[]>();
@@ -441,8 +442,12 @@ function createHarness(options: {
 				return;
 			}
 			if (options.sendFailureAt === sent.length + 1) throw new Error("synthetic send failure");
-			sent.push({ content, options: sendOptions });
-			if (sendOptions) pending = true;
+			const record = () => {
+				sent.push({ content, options: sendOptions });
+				if (sendOptions) pending = true;
+			};
+			if (options.asyncSend) queueMicrotask(record);
+			else record();
 		},
 		async setModel(model: { provider: string; id: string }) {
 			if (options.setModelResult instanceof Error) throw options.setModelResult;
@@ -642,6 +647,14 @@ test("uses compact queue chrome at narrow terminal widths", async () => {
 		JSON.stringify(narrow.map((line) => [visibleWidth(line), line])),
 	);
 	assert.deepEqual(component.render(20), ["queued S1 F1"]);
+});
+
+test("turn-end steering lands natively before a delayed send would lose the poll", async () => {
+	const harness = createHarness({ asyncSend: true });
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "user steer");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent, [{ content: "user steer", options: { deliverAs: "steer" } }]);
 });
 
 test("injects one owned steering row at Pi's native turn boundary", async () => {

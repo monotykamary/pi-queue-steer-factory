@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.1 - 2026-09-11
+
+### Fixed
+
+- Turn-boundary dispatch now settles Pi's fire-and-forget `sendUserMessage` before the agent loop polls native queues, so a user steer is the next turn after the in-flight call instead of waiting behind Fabric participant follow-ups that only show in Pi's pending widget.
+
 ## 0.17.0 - 2026-09-09
 
 ### Fixed

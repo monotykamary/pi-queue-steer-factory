@@ -425,6 +425,19 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return takeMessageBatch(queue, editSession, queueModes(), lane);
 	};
 
+	/**
+	 * Pi's public sendUserMessage is fire-and-forget: the extension wrapper
+	 * discards the Promise. The agent loop polls steering/follow-up queues
+	 * immediately after turn_end/agent_end listeners resolve, so a delayed
+	 * prompt() would land after Fabric participant messages already sitting
+	 * in the native pending widget — including follow-ups that are not
+	 * steers. Drain microtasks so prompt() reaches agent.steer()/followUp()
+	 * before that poll.
+	 */
+	const settleNativeSend = async (): Promise<void> => {
+		for (let i = 0; i < 16; i++) await Promise.resolve();
+	};
+
 	const deliverBatchToNativeQueue = async (
 		ctx: ExtensionContext,
 		lane: QueueLane,
@@ -447,6 +460,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				pi.sendUserMessage(userContent(item), { deliverAs: lane });
 				submitted += 1;
 			}
+			await settleNativeSend();
 			persistCommittedQueue(ctx);
 			// The public send API is fire-and-forget. Once invoked, do not infer
 			// rejection from aggregate queue timing: a delayed preflight could
