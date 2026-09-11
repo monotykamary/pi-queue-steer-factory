@@ -26,7 +26,7 @@ test("RPC adapter requires ownership, correlates acceptance, and never interpret
 	assert.throws(() => createPiRpcQueuePorts({ ...options, owned: false as never }), /ownership/);
 	const c = new QueueController({ sessionId: "rpc", ports: createPiRpcQueuePorts(options) });
 	await c.request(enqueue("1", "root", "followUp"));
-	await c.request(enqueue("2", "child"));
+	await c.request({ version: 1, requestId: "2", operation: { type: "enqueue", text: "child", lane: "steer", tail: true } });
 	await c.request(enqueue("3", "tail", "followUp"));
 	const before = c.snapshot();
 	assert.equal(observePiRpcQueueEvent(c, { type: "queue_update", steering: ["foreign"], followUp: [] }), undefined);

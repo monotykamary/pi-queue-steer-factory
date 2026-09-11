@@ -5,6 +5,7 @@
 ### Fixed
 
 - Turn-boundary dispatch now settles Pi's fire-and-forget `sendUserMessage` before the agent loop polls native queues, so a user steer is the next turn after the in-flight call instead of waiting behind Fabric participant follow-ups that only show in Pi's pending widget.
+- Headless `enqueue` with lane `steer` joins the current run (same placement as interactive `enqueueSteer`). Pass `tail: true` to append a future-run child after later follow-up roots.
 
 ## 0.17.0 - 2026-09-09
 

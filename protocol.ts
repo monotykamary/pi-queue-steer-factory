@@ -10,7 +10,7 @@ export type QueueBoundary = "idle" | "turn-end" | "agent-end" | "settled";
 export interface RowPatch { text?: string; images?: ImageContent[]; lane?: QueueLane; paused?: boolean; removed?: boolean }
 export type QueueOperation =
 	| { type: "snapshot" }
-	| { type: "enqueue"; lane: QueueLane; text: string; images?: ImageContent[]; paused?: boolean }
+	| { type: "enqueue"; lane: QueueLane; text: string; images?: ImageContent[]; paused?: boolean; tail?: boolean }
 	| { type: "edit-begin" | "edit-select"; id: string }
 	| { type: "edit-patch"; patch: RowPatch }
 	| { type: "edit-save" | "edit-cancel" }
@@ -72,7 +72,7 @@ export function readQueueRequest(value: unknown): QueueRequest | undefined {
 	let valid = false;
 	switch (op.type) {
 		case "snapshot": case "edit-save": case "edit-cancel": case "pause": case "resume": case "graceful-pause": case "cancel-gate": valid = true; break;
-		case "enqueue": valid = lane(op.lane) && typeof op.text === "string" && (op.images === undefined || isQueueImages(op.images)) && (op.paused === undefined || typeof op.paused === "boolean"); break;
+		case "enqueue": valid = lane(op.lane) && typeof op.text === "string" && (op.images === undefined || isQueueImages(op.images)) && (op.paused === undefined || typeof op.paused === "boolean") && (op.tail === undefined || typeof op.tail === "boolean"); break;
 		case "edit-begin": case "edit-select": case "remove": valid = id(op.id); break;
 		case "edit-patch": valid = isPatch(op.patch); break;
 		case "reorder": valid = id(op.id) && (op.direction === -1 || op.direction === 1); break;

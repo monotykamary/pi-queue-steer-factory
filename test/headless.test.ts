@@ -19,7 +19,11 @@ function harness(ports: Partial<QueuePorts> = {}, all = false) {
 	let requestId = 0;
 	const request = (operation: QueueOperation) => controller.request({ version: 1, requestId: `${++requestId}`, operation });
 	const mutate = async (operation: QueueOperation) => { const reply = await request(operation); assert.equal(reply.ok, true, !reply.ok ? reply.error : ""); return reply.snapshot; };
-	const enqueue = async (text: string, lane: "steer" | "followUp" = "steer") => (await mutate({ type: "enqueue", lane, text })).rows.at(-1)!.id;
+	const enqueue = async (text: string, lane: "steer" | "followUp" = "steer", tail = false) => {
+		const before = new Set(controller.snapshot().rows.map((row) => row.id));
+		const snapshot = await mutate({ type: "enqueue", lane, text, ...(tail ? { tail: true } : {}) });
+		return snapshot.rows.find((row) => !before.has(row.id))!.id;
+	};
 	return { controller, sent, events, checkpoints, request, mutate, enqueue };
 }
 
@@ -29,15 +33,16 @@ test("mutations retain identity/order/images; row save is in-place and restart p
 	const b = await h.enqueue("b", "followUp");
 	const c = await h.enqueue("c");
 	const image = { type: "image" as const, data: "base64", mimeType: "image/png" };
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [a, c, b]);
 	await h.mutate({ type: "edit-begin", id: b });
 	await h.mutate({ type: "edit-patch", patch: { text: "edited", images: [image], lane: "steer", paused: true } });
-	assert.equal(h.controller.checkpoint().rows[1]!.text, "b");
+	assert.equal(h.controller.checkpoint().rows.find((row) => row.id === b)!.text, "b");
 	await h.mutate({ type: "edit-save" });
-	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [a, b, c]);
-	assert.deepEqual(h.controller.snapshot().rows[1], { id: b, text: "edited", lane: "steer", images: [image], sequence: 2, paused: true });
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [a, c, b]);
+	assert.deepEqual(h.controller.snapshot().rows.find((row) => row.id === b), { id: b, text: "edited", lane: "steer", images: [image], sequence: 2, paused: true });
 	const snapshot = h.controller.snapshot();
-	snapshot.rows[1]!.images[0]!.data = "corrupted";
-	assert.equal(h.controller.snapshot().rows[1]!.images[0]!.data, "base64");
+	snapshot.rows.find((row) => row.id === b)!.images[0]!.data = "corrupted";
+	assert.equal(h.controller.snapshot().rows.find((row) => row.id === b)!.images[0]!.data, "base64");
 	await h.mutate({ type: "lane", id: b, lane: "followUp" });
 	await h.mutate({ type: "hold", id: b, paused: false });
 	await h.mutate({ type: "remove", id: c });
@@ -55,11 +60,22 @@ test("mutations retain identity/order/images; row save is in-place and restart p
 	assert.equal(next.snapshot.rows[0]!.id, "steer-4", "consumed IDs are not reused after empty restart");
 });
 
+test("steer enqueue joins the current run unless tail is set", async () => {
+	const h = harness();
+	const a = await h.enqueue("first");
+	const root = await h.enqueue("root", "followUp");
+	const child = await h.enqueue("future child", "steer", true);
+	const next = await h.enqueue("second");
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.text), ["first", "second", "root", "future child"]);
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [a, next, root, child]);
+});
+
 test("Escape rolls back multi-row text, removal, depth, hold and position drafts", async () => {
 	const h = harness();
 	const a = await h.enqueue("a");
 	const b = await h.enqueue("b", "followUp");
 	const c = await h.enqueue("c");
+	assert.deepEqual(h.controller.snapshot().rows.map((r) => r.id), [a, c, b]);
 	const original = h.controller.snapshot().rows;
 	await h.mutate({ type: "edit-begin", id: c });
 	await h.mutate({ type: "reorder", id: c, direction: -1 });
@@ -96,7 +112,7 @@ test("strict FIFO, all-mode edited batch pinning, command and row-pause barriers
 	const a = await h.enqueue("a");
 	const b = await h.enqueue("b");
 	const root = await h.enqueue("root", "followUp");
-	await h.enqueue("child");
+	await h.enqueue("child", "steer", true);
 	await h.mutate({ type: "resume" });
 	h.controller.observe({ type: "agent-start" });
 	await h.mutate({ type: "edit-begin", id: b });
@@ -120,7 +136,7 @@ test("partial rejected/uncertain batch leaves exact unsent tail paused with writ
 	for (const outcome of ["rejected", "uncertain"] as const) {
 		let calls = 0;
 		const h = harness({ send: async () => ({ outcome: ++calls === 1 ? "accepted" : outcome }) }, true);
-		await h.enqueue("a"); await h.enqueue("b"); await h.enqueue("root", "followUp"); await h.enqueue("later");
+		await h.enqueue("a"); await h.enqueue("b"); await h.enqueue("root", "followUp"); await h.enqueue("later", "steer", true);
 		const original = h.controller.snapshot().rows;
 		await h.mutate({ type: "resume" });
 		await h.controller.dispatch("turn-end");

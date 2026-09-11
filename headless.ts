@@ -159,7 +159,9 @@ export class QueueController {
 		switch (op.type) {
 			case "enqueue": {
 				if (!op.text.trim() && !op.images?.length) throw new Error("Empty queue row");
-				const row = this.queue.enqueue(op.lane, op.text, op.images);
+				const row = op.lane === "steer" && !op.tail
+					? this.queue.enqueueSteer(op.text, op.images)
+					: this.queue.enqueue(op.lane, op.text, op.images);
 				if (op.paused) this.queue.setPaused(row.id, true);
 				break;
 			}
