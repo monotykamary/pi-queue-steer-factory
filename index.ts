@@ -1048,7 +1048,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (features.has(QUEUE_STEER_FEATURE)) return;
 
 		const factory = ((tui, theme, keybindings) => {
-			const editor = previousFactory?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			// The fallback editor needs Pi's `embedWorkingStatus` opt-in or the
+			// streaming spinner drops out of the editor border; a factory installed
+			// by another extension carries its own choice.
+			const editor = previousFactory?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 			installSubmitGuard(editor, ctx);
 			const handleInput = editor.handleInput.bind(editor);
 			const renderEditor = editor.render.bind(editor);
