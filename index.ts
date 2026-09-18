@@ -361,6 +361,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// Publish the queue snapshot on every render (the choke point all queue,
 	// pause, and blocking-activity mutations funnel through). Mirrored on
 	// globalThis for synchronous reads, emitted on pi.events on change only.
+	// Peers: pi-ledger defers billing prompts; pi-fovea yields post-turn
+	// native steer/triggerTurn while pending > 0 so queued user rows stay first.
 	let lastBroadcastKey = "";
 	const broadcastQueueState = (): void => {
 		const state: QueueSteerState = {
