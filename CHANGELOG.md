@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.6 - Unreleased
+
+### Changed
+
+- Migrate development and host peer contracts to Pi 0.99.0; synchronize tracked npm/pnpm locks while retaining original dirty-lock snapshots in the migration report.
+- Add an offline actual-host probe for registrations, native codemode declaration hiding, nested validation/results, module identity, reload and shutdown. Existing queue, recovery and editor behavior remains unchanged.
+
 ## 0.17.1 - 2026-09-11
 
 ### Fixed
