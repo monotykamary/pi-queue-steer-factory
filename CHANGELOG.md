@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.7 - Unreleased
+
+### Changed
+
+- Pin development SDKs to Pi 1.0.0 and synchronize Bun/npm/pnpm lockfiles; retain host-provided peer dependencies.
+- Verify actual Pi 1.0 SDK and installed bundled-runtime registrations, loadouts, nested calls, reload and shutdown alongside the real-session queue/compaction ordering suite.
+
 ## 0.17.6 - Unreleased
 
 ### Changed

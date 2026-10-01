@@ -11,13 +11,13 @@ Move into any row to edit it. The selected row becomes the live Pi editor, with 
 
 For Rakazo, Pi RPC, or other headless owners, see the [versioned controller/control bridge](docs/headless.md). Import `QueueController` from `pi-queue-steer-factory/headless` without loading TUI. Async durable write-ahead persistence is supported.
 
-## Pi 0.99 compatibility (0.17.6)
+## Pi 1.0 compatibility (0.17.7)
 
-Tested with Pi **0.99.0**. Host-provided Pi packages and TypeBox are peers (`*`), not bundled runtime dependencies; development uses exact Pi 0.99.0 pins and host-compatible TypeBox where needed.
+Tested with Pi **1.0.0**. Host-provided Pi packages and TypeBox are peers (`*`), not bundled runtime dependencies; development uses exact Pi 1.0.0 pins and host-compatible TypeBox where needed.
 
 Verified native queue/recovery boundaries and nested tool lifecycle events, including Fabric-style hidden tool declarations. Editor composition remains on Pi's public custom-editor contract.
 
-Run `bun run test:host` for the offline real-host load, native codemode/nested-call, module-identity and reload checks. Set `PI99_HOST_PACKAGE` to an installed Pi package directory to test that host explicitly; add `PI99_HOST_ENTRY=bundle` to check the bundled CLI runtime's constructors.
+Run `bun run test:host` for the offline real-host load, native codemode/nested-call, module-identity and reload checks. Set `PI1_HOST_PACKAGE` to an installed Pi package directory to test that host explicitly; add `PI1_HOST_ENTRY=bundle` to check the bundled CLI runtime's constructors.
 
 ## Demo
 
