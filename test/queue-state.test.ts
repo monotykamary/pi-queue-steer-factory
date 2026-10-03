@@ -6,7 +6,7 @@ import test from "node:test";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { SessionManager, type CompactOptions, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Container, CURSOR_MARKER, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	FABRIC_PEER_AWAIT_SETTLE_EVENT,
 	FABRIC_PEER_CARDS_EVENT,
@@ -361,6 +361,7 @@ function createHarness(options: {
 	};
 
 	const ui = {
+		theme: { fg: (_color: string, text: string) => text },
 		getEditorComponent: () => currentFactory,
 		setEditorComponent(factory: MockEditorFactory) {
 			editorInstallCount += 1;
@@ -548,6 +549,8 @@ async function enqueueFutureSteer(harness: ReturnType<typeof createHarness>, tex
 }
 
 function renderWidget(harness: ReturnType<typeof createHarness>, width = 76): string {
+	// During editing the same outline occupies the editor slot, not a widget.
+	if (!harness.widget) return harness.editor.render(width).join("\n");
 	const widgetFactory = harness.widget as (tui: unknown, theme: any) => { render(width: number): string[] };
 	const component = widgetFactory({}, { fg: (_color: string, text: string) => text });
 	return component.render(width).join("\n");
@@ -631,6 +634,82 @@ test("keeps queued text aligned when its row becomes the live editor", async () 
 	assert.ok(queuedLine);
 	assert.ok(editingLine);
 	assert.equal(queuedLine.indexOf("aligned message"), editingLine.indexOf("aligned message"));
+});
+
+for (const mode of ["regular", "fullscreen"] as const) {
+	for (const finish of ["enter", "escape"] as const) {
+		test(`${mode}: queue edits occupy the composer slot until ${finish}`, async () => {
+			const harness = createHarness();
+			await harness.emit("session_start");
+			await enqueue(harness, "followUp", "first row");
+			await enqueue(harness, "followUp", "second row");
+			harness.editor.setText("composer draft");
+			const editor = harness.editor;
+			assert.ok(harness.widget);
+			harness.editor.handleInput("alt-up");
+			harness.editor.setText("edited row");
+			assert.equal(harness.widget, undefined, "no duplicate above-editor queue");
+			assert.equal(harness.editor, editor, "retain the installed editor and focus");
+
+			const footer = { render: () => ["footer"], invalidate() {} };
+			// Pi's fullscreen dock enforces minSize: 3 even for an empty editor.
+			const dock = mode === "fullscreen"
+				? new VStack([{ component: editor, shrink: 1, minSize: 3 }, footer])
+				: new Container();
+			if (mode === "regular") {
+				dock.addChild(editor);
+				dock.addChild(footer);
+			}
+			for (const width of [30, 76, 120]) {
+				const lines = dock.render(width);
+				assert.equal(lines.filter((line) => line.includes("delivery plan")).length, 1);
+				assert.ok(lines.some((line) => line.includes("edited row")));
+				assert.ok(lines.at(-2)?.startsWith("└"), "queue ends immediately above footer");
+				assert.equal(lines.at(-1), "footer");
+				assert.ok(lines.every((line) => visibleWidth(line) <= width));
+			}
+
+			harness.editor.handleInput(finish);
+			assert.ok(harness.widget, "restore the above-editor queue");
+			assert.equal(harness.editor.getText(), "composer draft");
+			assert.doesNotMatch(harness.editor.render(76).join("\n"), /delivery plan/);
+			assert.match(renderWidget(harness), finish === "enter" ? /edited row/ : /second row/);
+			assert.equal(harness.sent.length, 0);
+			await harness.emit("session_shutdown", { reason: "exit" });
+		});
+	}
+}
+
+test("composer-slot queue editing preserves composed editor input, multiline text and cursor", async () => {
+	class ComposedEditor extends MockEditor {
+		override render(width: number): string[] {
+			return [
+				`╭${" custom header ".padEnd(width - 2, "─")}╮`,
+				...this.getText().split("\n").map((line, index) => (
+					`│${index === 0 ? CURSOR_MARKER : ""}${line.slice(0, width - 2).padEnd(width - 2)}│`
+				)),
+				`╰${" custom footer ".padEnd(width - 2, "─")}╯`,
+				"suggestion",
+			];
+		}
+	}
+	const harness = createHarness();
+	const base = new ComposedEditor();
+	harness.replaceEditor(base);
+	await harness.emit("session_start");
+	await enqueue(harness, "followUp", "first line\nsecond line");
+	harness.editor.handleInput("alt-up");
+	harness.editor.handleInput("ctrl-f");
+	assert.deepEqual(base.handledInputs, ["ctrl-f"]);
+	const lines = harness.editor.render(76).join("\n");
+	assert.match(lines, /first line/);
+	assert.match(lines, /second line/);
+	assert.match(lines, /suggestion/);
+	assert.equal(lines.split(CURSOR_MARKER).length - 1, 1);
+	assert.doesNotMatch(lines, /custom header/);
+	harness.editor.handleInput("escape");
+	assert.match(harness.editor.render(76).join("\n"), /custom header/);
+	await harness.emit("session_shutdown", { reason: "exit" });
 });
 
 test("uses compact queue chrome at narrow terminal widths", async () => {

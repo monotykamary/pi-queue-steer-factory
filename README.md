@@ -35,14 +35,14 @@ pi install npm:pi-fabric
 Pin the current releases when you want reproducible installs:
 
 ```bash
-pi install npm:pi-queue-steer-factory@0.16.0
+pi install npm:pi-queue-steer-factory@0.17.8
 pi install npm:pi-fabric@0.83.0
 ```
 
 The GitHub package is also installable directly:
 
 ```bash
-pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.17.0
+pi install git:github.com/monotykamary/pi-queue-steer-factory@v0.17.8
 ```
 
 Then start a new Pi session or run `/reload`.
@@ -191,7 +191,7 @@ Fabric remains the execution plane inside the task: it can launch durable or rec
 - saving never changes a row’s lane implicitly; `Option+Right` indents to steering and `Option+Left` outdents to follow-up
 - depth changes preview in place and commit without changing the row’s global timeline position; `Option+T` remains a toggle fallback
 - `Option+X` marks the selected row for removal; save deletes it, and `Escape` or a second `Option+X` restores it
-- a selected row becomes the real editor without a nested composer frame
+- a selected row becomes the real editor without a nested composer frame; while editing, the outline occupies the composer slot in both fullscreen and regular mode, with no unused input area beneath it
 - one editing session can hold drafts for several rows
 - `Escape` restores every row from the session snapshot, including removal marks and indent/outdent drafts
 - saving an empty text-only row removes it

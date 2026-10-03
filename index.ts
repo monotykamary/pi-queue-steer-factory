@@ -378,29 +378,27 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	};
 	broadcastQueueState();
 
+	const createQueueWidget = (ctx: ExtensionContext, theme: Theme): QueueTimelineWidget => new QueueTimelineWidget({
+		items: timelineItems(),
+		editingId: editSession?.selectedId,
+		renderInlineEditor,
+		paused,
+		idle: ctx.isIdle(),
+		awaitNote: blockingActivity === "fabric-await" ? fabricAwaitNote : undefined,
+		modes: queueModes(),
+		theme,
+	});
+
 	const renderQueue = (ctx: ExtensionContext): void => {
 		activeContext = ctx;
 		if (queue.length === 0) resumeQueue();
 		broadcastQueueState();
-		if (ctx.mode !== "tui" || queue.length === 0) {
+		if (ctx.mode !== "tui" || queue.length === 0 || editSession) {
 			ctx.ui.setWidget(WIDGET_ID, undefined);
 			return;
 		}
 
-		const items = timelineItems();
-		ctx.ui.setWidget(
-			WIDGET_ID,
-			(_tui, theme) => new QueueTimelineWidget({
-				items,
-				editingId: editSession?.selectedId,
-				renderInlineEditor,
-				paused,
-				idle: ctx.isIdle(),
-				awaitNote: blockingActivity === "fabric-await" ? fabricAwaitNote : undefined,
-				modes: queueModes(),
-				theme,
-			}),
-		);
+		ctx.ui.setWidget(WIDGET_ID, (_tui, theme) => createQueueWidget(ctx, theme));
 	};
 
 	// The newest custom entry is authoritative on resume. Any committed
@@ -1074,7 +1072,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			};
 
 			editor.render = (width: number): string[] => {
-				if (editSession && !renderingInline) return [];
+				if (editSession && !renderingInline) {
+					// Fullscreen Pi reserves at least three editor rows even when render
+					// returns []. Use that slot for the outline in both terminal modes.
+					const current = activeContext ?? ctx;
+					return createQueueWidget(current, current.ui.theme).render(width);
+				}
 				return renderEditor(width);
 			};
 

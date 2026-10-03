@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.8 - 2026-10-03
+
+### Fixed
+
+- Render the editing queue in the composer slot instead of hiding the composer beneath an above-editor widget. This reclaims fullscreen Pi's three reserved input lines and keeps the same editing layout in regular mode, without modifying Pi core.
+- Preserve the composed editor's input, cursor, multiline text and autocomplete output; saving or cancelling restores the normal composer and its stashed draft.
+
+### Tests
+
+- Add fullscreen/regular layout regressions and `npm run test:tui-layout`, an offline real-Pi tmux probe covering idle and active-run editing, resizing, row navigation, depth changes, save/cancel and FIFO delivery.
+
 ## 0.17.7 - Unreleased
 
 ### Changed

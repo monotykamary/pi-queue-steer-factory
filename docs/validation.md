@@ -2,6 +2,18 @@
 
 This document records the deterministic validation matrix for compaction-aware command rows. The implementation remains extension-only and uses public Pi extension APIs.
 
+## Queue editor layout (0.17.8)
+
+Verified on Pi 1.0.0: `npm run ci` passes all 232 tests, and `npm run test:host` passes the actual SDK load/lifecycle probe. The unit regressions exercise fullscreen's three-line editor minimum and regular-mode composition at widths 30, 76 and 120, save/cancel restoration, and composed-editor input, multiline text, cursor markers and autocomplete output.
+
+For real terminal evidence (requires tmux):
+
+```bash
+npm run test:tui-layout -- /tmp/pi-queue-editor-layout-0.17.8
+```
+
+Both fullscreen and regular sessions pass with the offline faux provider. Captures confirm the editing outline ends immediately above the footer, with no blank composer reservation, both idle and while the agent works. The probe also checks multiline edits, indenting, row navigation, terminal resize, save/cancel, composer-draft restoration, other extension widgets and exactly-once FIFO delivery. `*-editing.txt`, `*-busy-editing.txt`, `*-narrow.txt`, `*-saved.txt` and `*-cancelled.txt` capture the transitions; `*-calls.json` records delivery.
+
 ## Automated suite
 
 The Pi package ranges are intentionally unpinned. The lockfile records the versions used for a reproducible checkout, but the package manifest does not declare an artificial Pi compatibility target.
