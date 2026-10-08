@@ -712,6 +712,30 @@ test("composer-slot queue editing preserves composed editor input, multiline tex
 	await harness.emit("session_shutdown", { reason: "exit" });
 });
 
+test("cooperating outer editors retain ownership while dead queue factories and submit guards become inert", async () => {
+	const harness = createHarness();
+	const base = harness.editorFactory;
+	await harness.emit("session_start");
+	const owned = harness.editorFactory;
+	harness.wrapEditorFactory();
+	const outer = harness.editorFactory;
+	const patch = Symbol.for("pi.editor-factory.patch.v1");
+	(outer as any)[patch] = { active: true, original: owned };
+	// A cooperating decorator may copy the feature set from its delegate.
+	(outer as any)[Symbol.for("@tmustier/pi-editor-features")] = (owned as any)[Symbol.for("@tmustier/pi-editor-features")];
+	const installs = harness.editorInstallCount;
+	await harness.emit("session_start");
+	assert.equal(harness.editorInstallCount, installs, "queue feature is visible through the outer wrapper");
+	const retained = harness.editor;
+	await harness.emit("session_shutdown", { reason: "exit" });
+	assert.equal(harness.editorFactory, outer, "an active outer owner is never removed");
+	assert.equal((owned as any)[patch].active, false);
+	retained.onSubmit?.("/compact");
+	assert.equal(harness.compactCalls.length, 0, "retained submit guard cannot compact a stale session");
+	const fresh = owned({}, {}, {});
+	assert.deepEqual(fresh.render(76), base({}, {}, {}).render(76));
+});
+
 test("uses compact queue chrome at narrow terminal widths", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");

@@ -647,10 +647,11 @@ test("real /pause stops at the tool boundary without killing the in-flight tool"
 		tools: ["gate_tool"],
 	});
 	let settled = false;
+	let settledAborted: boolean | undefined;
 	let gateToolStarted = false;
 	harness.session.subscribe((event) => {
 		if (event.type === "tool_execution_start" && event.toolName === "gate_tool") gateToolStarted = true;
-		if (event.type === "agent_settled") settled = true;
+		if (event.type === "agent_settled") { settled = true; settledAborted = event.aborted; }
 	});
 	try {
 		harness.faux.setResponses([
@@ -703,6 +704,7 @@ test("real /pause stops at the tool boundary without killing the in-flight tool"
 		assert.equal(userTexts(harness.session).includes("parked during pause"), false);
 		assert.equal(globalThis.__tmustierPiQueueSteerState?.pending, 1);
 		assert.equal(globalThis.__tmustierPiQueueSteerState?.paused, true);
+		assert.equal(settledAborted, true, "Pi 1.1 settle reports the tool-boundary abort");
 	} finally {
 		releaseToolGate?.();
 		await harness.cleanup();

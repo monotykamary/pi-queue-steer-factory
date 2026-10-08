@@ -41,6 +41,30 @@ test("RPC adapter requires ownership, correlates acceptance, and never interpret
 	assert.ok(commands.every((c) => typeof c.id === "string" && Array.isArray(c.images)));
 });
 
+test("Pi 1.1 cancelled settle parks rows even without a streamed abort tail", async () => {
+	for (const aborted of [true, false, undefined]) {
+		const sent: string[] = [];
+		const c = new QueueController({ sessionId: "rpc", ports: { send: async (row) => {
+			sent.push(row.text); return { outcome: "accepted" };
+		} } });
+		await c.request(enqueue("1", "parked", "followUp"));
+		await c.request(resume);
+		observePiRpcQueueEvent(c, { type: "agent_start" });
+		const boundary = observePiRpcQueueEvent(c, { type: "agent_settled", aborted });
+		assert.equal(boundary, "settled");
+		await c.dispatch(boundary!);
+		assert.deepEqual(sent, aborted === true ? [] : ["parked"]);
+		if (aborted === true) {
+			assert.equal(c.snapshot().paused, true);
+			assert.equal(c.snapshot().rows.length, 1);
+			await c.request({ ...resume, requestId: "explicit-go" });
+			await c.dispatch("idle");
+			assert.deepEqual(sent, ["parked"]);
+		}
+		await c.dispose();
+	}
+});
+
 test("RPC rejection, disconnect, and mismatched acceptance preserve rows and attachments paused", async () => {
 	for (const mode of ["reject", "disconnect", "mismatch"] as const) {
 		const c = new QueueController({ sessionId: "rpc", ports: createPiRpcQueuePorts({ owned: true, request: async (cmd) => {

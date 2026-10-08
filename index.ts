@@ -99,11 +99,30 @@ export const NATIVE_FLUSH_GRACE_MS = 2000;
 const AWAIT_PEERS_KEY = "alt+w";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
-type ComposedEditorFactory = EditorFactory & { [EDITOR_FEATURES]?: ReadonlySet<string> };
+const EDITOR_FACTORY_PATCH = Symbol.for("pi.editor-factory.patch.v1");
+type EditorFactoryState = { active: boolean; original?: EditorFactory };
+type ComposedEditorFactory = EditorFactory & {
+	[EDITOR_FEATURES]?: ReadonlySet<string>;
+	[EDITOR_FACTORY_PATCH]?: EditorFactoryState;
+};
+function unwrapEditorFactory(factory: EditorFactory | undefined): EditorFactory | undefined {
+	while (factory) {
+		const state = (factory as ComposedEditorFactory)[EDITOR_FACTORY_PATCH];
+		if (!state || state.active) return factory;
+		factory = state.original;
+	}
+	return undefined;
+}
 type InlineEditorRenderer = (width: number) => string[];
 
 function editorFeatures(factory: EditorFactory | undefined): ReadonlySet<string> {
-	return (factory as ComposedEditorFactory | undefined)?.[EDITOR_FEATURES] ?? new Set();
+	while (factory) {
+		const wrapped = factory as ComposedEditorFactory;
+		const state = wrapped[EDITOR_FACTORY_PATCH];
+		if (state?.active !== false && wrapped[EDITOR_FEATURES]) return wrapped[EDITOR_FEATURES]!;
+		factory = state?.original;
+	}
+	return new Set();
 }
 
 function matchesOptionArrow(data: string, direction: "left" | "right"): boolean {
@@ -224,6 +243,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	let editorInstallTimer: ReturnType<typeof setTimeout> | undefined;
 	let baseEditorFactory: EditorFactory | undefined;
 	let baseEditorFactoryCaptured = false;
+	const editorFactoryStates: EditorFactoryState[] = [];
 	let commandSubmitTimer: ReturnType<typeof setTimeout> | undefined;
 	let renderingInline = false;
 	let paused = false;
@@ -1043,16 +1063,18 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	const installEditor = (ctx: ExtensionContext): void => {
 		if (ctx.mode !== "tui") return;
 
-		const previousFactory = ctx.ui.getEditorComponent();
+		const previousFactory = unwrapEditorFactory(ctx.ui.getEditorComponent());
 		const features = editorFeatures(previousFactory);
 		if (features.has(QUEUE_STEER_FEATURE)) return;
 
+		const state: EditorFactoryState = { active: true, original: previousFactory };
 		const factory = ((tui, theme, keybindings) => {
 			// The fallback editor needs Pi's `embedWorkingStatus` opt-in or the
 			// streaming spinner drops out of the editor border; a factory installed
 			// by another extension carries its own choice.
-			const editor = previousFactory?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
-			installSubmitGuard(editor, ctx);
+			const editor = unwrapEditorFactory(previousFactory)?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
+			if (!state.active) return editor;
+			installSubmitGuard(editor, ctx, () => state.active);
 			const handleInput = editor.handleInput.bind(editor);
 			const renderEditor = editor.render.bind(editor);
 			const isShowingAutocomplete = (): boolean => {
@@ -1072,6 +1094,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			};
 
 			editor.render = (width: number): string[] => {
+				if (!state.active) return renderEditor(width);
 				if (editSession && !renderingInline) {
 					// Fullscreen Pi reserves at least three editor rows even when render
 					// returns []. Use that slot for the outline in both terminal modes.
@@ -1082,6 +1105,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			};
 
 			editor.handleInput = (data: string): void => {
+				if (!state.active) { handleInput(data); return; }
 				if (editSession) {
 					if (keybindings.matches(data, "app.message.dequeue")) {
 						selectQueueItem(ctx, "previous");
@@ -1236,6 +1260,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return editor;
 		}) as ComposedEditorFactory;
 		factory[EDITOR_FEATURES] = new Set([...features, QUEUE_STEER_FEATURE]);
+		factory[EDITOR_FACTORY_PATCH] = state;
+		editorFactoryStates.push(state);
 		// Preserve the factory from before this runtime's first wrapper. A later
 		// unmarked composer may itself close over our wrapper; restoring that on
 		// reload would carry stale submit guards into the replacement runtime.
@@ -1309,13 +1335,14 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		if (ctx.isIdle() && !blockingActivity && !editSession) dispatchFromIdle(ctx);
 	};
 
-const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): void => {
+const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isActive: () => boolean): void => {
 		const guarded = editor as EditorComponent & { [SUBMIT_GUARD]?: boolean };
 		if (guarded[SUBMIT_GUARD]) return;
 		guarded[SUBMIT_GUARD] = true;
 		let innerSubmit = editor.onSubmit;
 		if (innerSubmit) tuiSubmit = innerSubmit;
 		const wrappedSubmit = (text: string) => {
+			if (!isActive()) { innerSubmit?.(text); return; }
 			const command = parseQueuedCommand(text);
 			if (!editSession && command && isCompacting()) {
 				deferCommand(ctx, text);
@@ -1365,7 +1392,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 			get: () => wrappedSubmit,
 			set: (fn: ((text: string) => void) | undefined) => {
 				innerSubmit = fn;
-				if (fn) tuiSubmit = fn;
+				if (fn && isActive()) tuiSubmit = fn;
 			},
 		});
 	};
@@ -1698,15 +1725,17 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext): voi
 		unsubscribeConversationQueueBridge();
 		if (commandSubmitTimer) clearTimeout(commandSubmitTimer);
 		if (compactionFinishTimer) clearTimeout(compactionFinishTimer);
+		const currentFactory = activeContext?.hasUI ? activeContext.ui.getEditorComponent() : undefined;
+		// Feature sets may be inherited by an active outer decorator. Only our
+		// own state proves ownership; never strip that outer owner on shutdown.
+		const ownsCurrentFactory = currentFactory && editorFactoryStates.includes((currentFactory as ComposedEditorFactory)[EDITOR_FACTORY_PATCH]!);
+		for (const state of editorFactoryStates) state.active = false;
+		editorFactoryStates.length = 0;
 		if (activeContext?.hasUI) {
-			const currentFactory = activeContext.ui.getEditorComponent();
-			if (
-				baseEditorFactoryCaptured
-				&& currentFactory
-				&& editorFeatures(currentFactory).has(QUEUE_STEER_FEATURE)
-			) {
-				activeContext.ui.setEditorComponent(baseEditorFactory);
-			}
+			const unwrapped = ownsCurrentFactory && baseEditorFactoryCaptured
+				? unwrapEditorFactory(baseEditorFactory)
+				: unwrapEditorFactory(currentFactory);
+			if (unwrapped !== currentFactory) activeContext.ui.setEditorComponent(unwrapped);
 			activeContext.ui.setWidget(WIDGET_ID, undefined);
 		}
 		activeContext = undefined;

@@ -13,7 +13,7 @@ For Rakazo, Pi RPC, or other headless owners, see the [versioned controller/cont
 
 ## Pi 1.0 compatibility (0.17.7)
 
-Tested with Pi **1.0.0**. Host-provided Pi packages and TypeBox are peers (`*`), not bundled runtime dependencies; development uses exact Pi 1.0.0 pins and host-compatible TypeBox where needed.
+Tested with Pi **1.1.0**. Host-provided Pi packages and TypeBox are peers (`*`), not bundled runtime dependencies; development uses exact Pi 1.1.0 pins and host-compatible TypeBox where needed.
 
 Verified native queue/recovery boundaries and nested tool lifecycle events, including Fabric-style hidden tool declarations. Editor composition remains on Pi's public custom-editor contract.
 

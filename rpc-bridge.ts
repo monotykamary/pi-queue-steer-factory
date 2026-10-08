@@ -44,7 +44,12 @@ export function observePiRpcQueueEvent(controller: QueueController, value: unkno
 	const event = value as Record<string, unknown>;
 	switch (event.type) {
 		case "agent_start": controller.observe({ type: "agent-start" }); return;
-		case "agent_settled": controller.observe({ type: "settled" }); return "settled";
+		case "agent_settled":
+			// Pi 1.1 reports cancellation explicitly, even without an assistant
+			// tail. Reuse the tail policy so error holds and owned controls retain
+			// their existing semantics instead of treating an abort as success.
+			if (event.aborted === true) controller.observe({ type: "tail", phase: "agent", stopReason: "aborted" });
+			controller.observe({ type: "settled" }); return "settled";
 		case "turn_end": case "agent_end": {
 			const tail = event.type === "turn_end" ? event.message : Array.isArray(event.messages) ? event.messages.at(-1) : undefined;
 			if (tail && typeof tail === "object" && tail.role === "assistant") {

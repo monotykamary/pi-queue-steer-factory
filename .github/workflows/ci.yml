@@ -19,3 +19,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run ci
+      - run: npm run test:host
+      - run: PI1_HOST_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" PI1_HOST_ENTRY=bundle npm run test:host
