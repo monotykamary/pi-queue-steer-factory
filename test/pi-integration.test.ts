@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
 	fauxAssistantMessage,
 	fauxProvider,
@@ -125,6 +125,7 @@ async function createIntegrationHarness(options: {
 	retryEnabled?: boolean;
 	reasoning?: boolean;
 	tools?: string[];
+	cacheRetention?: "none";
 } = {}): Promise<IntegrationHarness> {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-queue-integration-"));
 	const agentDir = join(cwd, "agent");
@@ -151,7 +152,10 @@ async function createIntegrationHarness(options: {
 			baseUrl: model.baseUrl,
 			apiKey: "integration-test-key",
 			api: model.api,
-			streamSimple: faux.provider.streamSimple,
+			streamSimple: (model, context, streamOptions) => faux.provider.streamSimple(model, context, {
+				...streamOptions,
+				...(options.cacheRetention ? { cacheRetention: options.cacheRetention } : {}),
+			}),
 			models: [{
 				id: model.id,
 				name: model.name,
@@ -474,6 +478,7 @@ test("real public prompt path triggers overflow compaction and preserves a queue
 		contextWindow: 1_000,
 		maxTokens: 100,
 		extraExtensions: [summaryExtension],
+		cacheRetention: "none",
 	});
 	try {
 		const trace: string[] = [];
@@ -491,8 +496,14 @@ test("real public prompt path triggers overflow compaction and preserves a queue
 		]);
 		const activeStarted = nextAgentStart(harness.session);
 		const compactionEnded = nextCompactionEnd(harness.session);
+		// Pi 1.5 also compacts oversized prompts before dispatch. Isolate the
+		// post-response silent-overflow path, then re-enable automatic recovery
+		// while the provider is in flight. Disable the faux cache so reported
+		// input usage (rather than cacheWrite) exceeds the context window.
+		harness.session.setAutoCompactionEnabled(false);
 		const prompt = harness.session.prompt("x".repeat(20_000));
 		await within(activeStarted, () => trace.join(", "));
+		harness.session.setAutoCompactionEnabled(true);
 		await harness.session.prompt("queued across overflow", { streamingBehavior: "followUp" });
 		const queuedRun = nextAgentRunForUser(harness.session, "queued across overflow");
 		active.release();
