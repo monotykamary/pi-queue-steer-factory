@@ -3,6 +3,7 @@ allowBuilds:
   esbuild: false
   protobufjs: false
 minimumReleaseAgeExclude:
+  - '@earendil-works/pi-schema@1.5.0'
   # Explicitly reviewed Pi 1.5.0 migration; retain the age policy for all other releases.
   - '@earendil-works/chord@1.5.0'
   - '@earendil-works/pi-agent-core@1.5.0'
