@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
-import { SessionManager, type CompactOptions, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager, type CompactOptions, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { Container, CURSOR_MARKER, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	FABRIC_PEER_AWAIT_SETTLE_EVENT,
@@ -414,6 +414,7 @@ function createHarness(options: {
 		},
 	};
 
+	const hostSettings = SettingsManager.create(context.cwd, undefined, { projectTrusted: context.isProjectTrusted() });
 	const events = {
 		emit(channel: string, value: unknown) {
 			for (const handler of eventHandlers.get(channel) ?? []) handler(value);
@@ -428,6 +429,7 @@ function createHarness(options: {
 
 	const pi = {
 		events,
+		getSettings: () => hostSettings.getSettings(),
 		on(name: string, handler: Handler) {
 			const registered = handlers.get(name) ?? [];
 			registered.push(handler);
@@ -487,6 +489,9 @@ function createHarness(options: {
 		selectedModels,
 		selections,
 		events,
+		setQueueModes(modes: { steeringMode?: "all" | "one-at-a-time"; followUpMode?: "all" | "one-at-a-time" }) {
+			hostSettings.applyOverrides(modes);
+		},
 		async runCommand(name: string, args = "") {
 			const command = registeredCommands.get(name);
 			assert.ok(command, `expected /${name} to be registered`);
@@ -926,6 +931,48 @@ test("honours Pi all-mode settings and pins the whole edited lane", async () => 
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("live host modes update an existing queue widget without another queue event", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "first steer");
+	await enqueue(harness, "steer", "second steer");
+	const factory = harness.widget as (tui: unknown, theme: any) => { render(width: number): string[] };
+	const widget = factory({}, { fg: (_color: string, text: string) => text });
+	const render = () => widget.render(90).join("\n");
+	assert.match(render(), /» second steer/);
+
+	harness.setQueueModes({ steeringMode: "all" });
+	assert.match(render(), /▶ second steer/);
+	assert.equal(harness.sent.length, 0, "changing mode must not dispatch outside a boundary");
+
+	harness.setQueueModes({ steeringMode: "one-at-a-time" });
+	assert.match(render(), /» second steer/);
+	harness.setQueueModes({ steeringMode: "all" });
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent.map((item) => item.content), ["first steer", "second steer"]);
+});
+
+test("live modes recalculate edit pinning without saving drafts or restarting the run", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await enqueue(harness, "steer", "first steer");
+	await enqueue(harness, "steer", "second steer");
+	harness.editor.handleInput("alt-up");
+	harness.setQueueModes({ steeringMode: "all" });
+	assert.match(renderWidget(harness), /held while editing/);
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.equal(harness.sent.length, 0, "the newly selected all mode pins the edited head batch");
+
+	harness.setQueueModes({ steeringMode: "one-at-a-time" });
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent.map((item) => item.content), ["first steer"]);
+	assert.equal(harness.editor.getText(), "second steer", "mode changes do not commit the active edit");
+	assert.match(renderWidget(harness), /held while editing/);
+	harness.editor.handleInput("escape");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
+	assert.deepEqual(harness.sent.map((item) => item.content), ["first steer", "second steer"]);
 });
 
 test("all mode batches only the contiguous head lane segment", async () => {

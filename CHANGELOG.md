@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.13 - 2026-11-03
+
+### Fixed
+
+- Apply steering and follow-up mode changes from Pi's live settings to already queued rows at the next eligible boundary, without reloading or starting a new run. Preserve FIFO, paused-row barriers and unsaved-edit protection.
+- Refresh queue markers on redraw so switching between `one-at-a-time` and `all` stays visible even while the agent is running.
+
+### Tests
+
+- Cover live mode changes in both directions with real Pi sessions, existing widget redraws and edit-batch pinning.
+- Verify the native `/settings` flow in fullscreen and regular terminals without reloading the extension.
+
 ## 0.17.8 - 2026-10-03
 
 ### Fixed

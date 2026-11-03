@@ -117,6 +117,7 @@ The extension keeps Pi’s 2 delivery classes inside one ordered timeline:
 - change depth, edit text, reorder up/down and switch rows in one editing session, with no intermediate saves; one final `Enter` saves everything and `Escape` rolls it all back
 - new interactive steers join the leading current-run segment before the first future follow-up root; existing rows keep their relative order
 - Pi’s `one-at-a-time` and `all` settings still apply per lane, but an `all` batch stops at the next lane switch, command, or paused row
+- changes to steering or follow-up mode in `/settings` apply live to already queued rows at the next eligible boundary, without `/reload` or a new run; queue markers reflect the current mode on redraw
 
 To steer a future queued run instead, queue its child with `Option+Enter`, select it with `Option+Up`, then indent with `Option+Right`. Reorder it beneath the desired run without saving first. A plan of `follow-up A → steer A → follow-up B` starts A after the current run, steers A at its next turn boundary, then starts B after A settles. Plain-Enter `/compact` and `/new` retain their safe tail placement behind earlier rows; explicit headless enqueue also remains append-only.
 

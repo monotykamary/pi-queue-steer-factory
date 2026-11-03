@@ -10,6 +10,7 @@ import {
 	fauxText,
 	fauxToolCall,
 	type FauxProviderHandle,
+	type FauxResponseFactory,
 } from "@earendil-works/pi-ai/compat";
 import {
 	type AgentSession,
@@ -270,6 +271,53 @@ test("real AgentSession steers current work ahead of previously queued runs", as
 		await harness.cleanup();
 	}
 });
+
+for (const lane of ["steer", "followUp"] as const) {
+	for (const mode of ["all", "one-at-a-time"] as const) {
+		test(`real AgentSession applies live ${lane} mode ${mode} to already queued rows`, async () => {
+			const harness = await createIntegrationHarness();
+			const active = gatedResponse("active response");
+			try {
+				await seedSession(harness);
+				const setMode = (value: "all" | "one-at-a-time") => {
+					if (lane === "steer") harness.session.setSteeringMode(value);
+					else harness.session.setFollowUpMode(value);
+				};
+				setMode(mode === "all" ? "one-at-a-time" : "all");
+				const requests: string[][] = [];
+				const response: FauxResponseFactory = (context) => {
+					requests.push(context.messages.filter((message) => message.role === "user").map((message) =>
+						typeof message.content === "string" ? message.content
+							: message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
+					).slice(2));
+					return fauxAssistantMessage("queued response");
+				};
+				harness.faux.setResponses([active.step, response, response]);
+				const started = nextAgentStart(harness.session);
+				const running = harness.session.prompt("active prompt");
+				await within(started, () => "live-mode run did not start");
+				await harness.session.prompt("queued one", { streamingBehavior: lane });
+				await harness.session.prompt("queued two", { streamingBehavior: lane });
+				assert.equal(globalThis.__tmustierPiQueueSteerState?.pending, 2);
+				assert.equal(harness.session.getSteeringMessages().length, 0, "rows remain extension-owned until dispatch");
+				assert.equal(harness.session.getFollowUpMessages().length, 0);
+				const completed = nextAgentRunForUser(harness.session, "queued two");
+				setMode(mode);
+				active.release();
+				await running;
+				await within(completed, () => userTexts(harness.session).join(" -> "));
+				assert.deepEqual(requests, mode === "all"
+					? [["active prompt", "queued one", "queued two"]]
+					: [["active prompt", "queued one"], ["active prompt", "queued one", "queued two"]]);
+				assert.equal(harness.session.getSteeringMessages().length, 0);
+				assert.equal(harness.session.getFollowUpMessages().length, 0);
+			} finally {
+				active.release();
+				await harness.cleanup();
+			}
+		});
+	}
+}
 
 test("real AgentSession runs a queued manual compaction before the following row", async () => {
 	const harness = await createIntegrationHarness();

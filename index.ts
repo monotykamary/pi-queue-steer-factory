@@ -3,7 +3,6 @@ import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import {
 	CustomEditor,
 	keyText,
-	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	type ExtensionContext,
@@ -262,7 +261,6 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// The completion then stops the run at the tool boundary.
 	let pauseAfterToolsArmed = false;
 	const inFlightTools = new Map<string, string>();
-	let settingsManager: SettingsManager | undefined;
 	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "thinking" | "fabric-prewalk" | "fabric-await" | undefined;
 	let fabricAwaitAbort: AbortController | undefined;
 	let fabricAwaitNote = "";
@@ -301,10 +299,15 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// through it is the only public route to the built-in /reload.
 	let tuiSubmit: ((text: string) => void) | undefined;
 
-	const queueModes = (): QueueModes => ({
-		steer: settingsManager?.getSteeringMode() ?? "one-at-a-time",
-		followUp: settingsManager?.getFollowUpMode() ?? "one-at-a-time",
-	});
+	const queueModes = (): QueueModes => {
+		// Read the active host settings, not a second SettingsManager snapshot:
+		// /settings changes and in-memory SDK overrides must apply mid-run.
+		const settings = pi.getSettings();
+		return {
+			steer: settings.steeringMode ?? "one-at-a-time",
+			followUp: settings.followUpMode ?? "one-at-a-time",
+		};
+	};
 
 	/**
 	 * Park the queue behind an error hold after a failed run tail. An
@@ -418,7 +421,12 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		ctx.ui.setWidget(WIDGET_ID, (_tui, theme) => createQueueWidget(ctx, theme));
+		ctx.ui.setWidget(WIDGET_ID, (_tui, theme) => ({
+			// The host retains the component while /settings is open. Rebuild its
+			// snapshot on redraw so the armed markers track the live delivery mode.
+			render: (width) => createQueueWidget(ctx, theme).render(width),
+			invalidate() {},
+		}));
 	};
 
 	// The newest custom entry is authoritative on resume. Any committed
@@ -1488,7 +1496,6 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 
 	pi.on("session_start", async (event, ctx) => {
 		activeContext = ctx;
-		settingsManager = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 		ctx.ui.setWidget(WIDGET_ID, undefined);
 		await restoreRuntimeStash(event.reason, ctx);
 		restoreSessionQueue(event.reason, ctx);
@@ -1501,7 +1508,6 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 	pi.on("agent_start", async (_event, ctx) => {
 		installEditor(ctx);
 		scheduleEditorInstall(ctx);
-		await settingsManager?.reload();
 		renderQueue(ctx);
 	});
 
@@ -1746,7 +1752,6 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 		commandSubmitTimer = undefined;
 		compactionFinishTimer = undefined;
 		editSession = undefined;
-		settingsManager = undefined;
 		fabricAwaitAbort?.abort();
 		fabricAwaitAbort = undefined;
 		fabricAwaitNote = "";

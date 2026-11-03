@@ -63,7 +63,10 @@ try {
 		].map(quote).join(" ");
 		tmux("-f", "/dev/null", "new-session", "-d", "-s", "probe", "-x", "100", "-y", "30", "-c", workspace, launch);
 		tmux("set-option", "-g", "extended-keys", "on");
-		tmux("set-option", "-g", "extended-keys-format", "csi-u");
+		// Older tmux accepts our literal CSI-u input without this 3.4+ option.
+		try { tmux("set-option", "-g", "extended-keys-format", "csi-u"); } catch (error) {
+			if (!/invalid option: extended-keys-format/.test(String(error.stderr))) throw error;
+		}
 		await waitText("LAYOUT-FOOTER");
 		for (const row of ["first row", "second row"]) {
 			text(row);
@@ -125,13 +128,33 @@ try {
 		text("busy steer");
 		key("Enter");
 		await waitText("busy steer");
+		text("second busy steer");
+		key("Enter");
+		await waitText("» second busy steer");
+		for (const marker of ["▶", "»"]) {
+			text("/settings");
+			key("Enter");
+			await waitText("Type to search");
+			text("Steering mode");
+			await waitFor((current) => /→ Steering mode\s+(all|one-at-a-time)/.test(current), "selected steering setting");
+			key("Enter");
+			await waitFor((current) => new RegExp(`→ Steering mode\\s+${marker === "▶" ? "all" : "one-at-a-time"}`).test(current), "changed steering setting");
+			key("Escape");
+			await waitFor((current) => !current.includes("> Steering mode"), "settings search cleared or selector closed");
+			if (screen().includes("Type to search")) key("Escape");
+			await waitFor((current) => !current.includes("Type to search") && current.includes(`${marker} second busy steer`),
+				"live queue mode after closing settings");
+			capture(`${mode}-live-mode-${marker === "▶" ? "all" : "one"}`);
+		}
+		assert.equal(readFileSync(join(workspace, "runtime-inits.log"), "utf8").trim().split("\n").length, 1,
+			"mode changes do not reload the runtime");
 		text("busy follow-up");
 		sequence("\x1b[13;3u");
 		await waitText("busy follow-up");
 		text("composer draft");
 		sequence("\x1b[1;3A");
 		sequence("\x1b[1;3A");
-		await waitText("› busy steer");
+		await waitText("› second busy steer");
 		assertEditingLayout(capture(`${mode}-busy-editing`));
 		key("Escape");
 		await waitText("composer draft");
@@ -139,7 +162,7 @@ try {
 		await waitText("paused");
 		capture(`${mode}-busy-cancelled`);
 		tmux("kill-session", "-t", "probe");
-		console.log(`${mode}: no gap idle or busy; multiline/depth/navigation/resize/save/cancel/FIFO delivery passed`);
+		console.log(`${mode}: live settings markers; no gap idle or busy; multiline/depth/navigation/resize/save/cancel/FIFO delivery passed`);
 	}
 } catch (error) {
 	try { capture("failure"); } catch {}
