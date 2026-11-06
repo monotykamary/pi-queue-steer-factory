@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.14 - 2026-11-06
+
+### Fixed
+
+- Deliver committed steering and follow-up rows directly through Pi's native message lane instead of guessing when a fire-and-forget prompt has cleared asynchronous input hooks. A steer now reaches the next request even with long input-handler chains or deferred input processing.
+- Keep active-run drains and post-compaction queued sends on the same direct path. Preserve lane ordering, row provenance and image content; idle prompts and commands retain their existing dispatch.
+
+### Compatibility
+
+- Active-run rows are stored as `queue-steer:user` custom messages and rendered with Pi's public user-message component. Their model content is still user-role text/images. Session readers that count only `role: user` should also recognize this custom type. Already-admitted rows do not replay `input` hooks on delivery.
+
+### Tests
+
+- Reproduce the former one-request and full-settlement delays with real Pi sessions; assert the first next request receives steering exactly once. Cover native lane choice, attachments, row provenance and existing FIFO/recovery controls.
+
 ## 0.17.13 - 2026-11-03
 
 ### Fixed

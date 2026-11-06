@@ -22,6 +22,7 @@ import {
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import queueSteerExtension from "../index.ts";
+import { QUEUED_USER_MESSAGE_TYPE } from "../native-delivery.ts";
 import { latestQueueSnapshot } from "../queue-persistence.ts";
 
 type CompactionEndEvent = Extract<AgentSessionEvent, { type: "compaction_end" }>;
@@ -76,7 +77,8 @@ function nextAgentRunForUser(session: AgentSession, expected: string): Promise<v
 		let matched = false;
 		let unsubscribe: (() => void) | undefined;
 		unsubscribe = session.subscribe((event) => {
-			if (event.type === "message_start" && event.message.role === "user") {
+			if (event.type === "message_start" && (event.message.role === "user"
+				|| (event.message.role === "custom" && event.message.customType === QUEUED_USER_MESSAGE_TYPE))) {
 				const text = typeof event.message.content === "string"
 					? event.message.content
 					: event.message.content
@@ -108,9 +110,8 @@ async function within<T>(promise: Promise<T>, detail: () => string): Promise<T> 
 }
 
 function userTexts(session: AgentSession): string[] {
-	return session.messages
-		.filter((message) => message.role === "user")
-		.map((message) => {
+	return session.messages.flatMap((message) => {
+			if (message.role !== "user" && !(message.role === "custom" && message.customType === QUEUED_USER_MESSAGE_TYPE)) return [];
 			if (typeof message.content === "string") return message.content;
 			return message.content
 				.filter((part) => part.type === "text")
@@ -233,6 +234,45 @@ async function seedSession(harness: IntegrationHarness): Promise<void> {
 	]);
 	await harness.session.prompt("seed one");
 	await harness.session.prompt("seed two");
+}
+
+for (const hookMode of ["many", "async"] as const) {
+ test(`native steering reaches the next request with ${hookMode} input hooks`, async () => {
+  let repeatedInputs = 0;
+  const extra: ExtensionFactory = pi => {
+   for (let i = 0; i < (hookMode === "many" ? 40 : 1); i++) {
+    pi.on("input", async event => {
+     if (event.source === "extension") {
+      repeatedInputs++;
+      if (hookMode === "async") await new Promise<void>(resolve => setImmediate(resolve));
+     }
+    });
+   }
+   pi.registerTool({ name: "probe", label: "probe", description: "probe", parameters: Type.Object({}),
+    async execute() { return { content: [{ type: "text", text: "ok" }], details: {} }; } });
+  };
+  const harness = await createIntegrationHarness({ extraExtensions: [extra], tools: ["probe"] });
+  const first = gatedResponse("first");
+  const requests: string[][] = [];
+  const response: FauxResponseFactory = context => {
+   requests.push(context.messages.filter(m => m.role === "user").map(m => typeof m.content === "string" ? m.content : m.content.filter(p => p.type === "text").map(p => p.text).join("\n")));
+   return fauxAssistantMessage("done");
+  };
+  harness.faux.setResponses([async () => { await first.step(); return fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" }); }, response, response]);
+  try {
+   const started = nextAgentStart(harness.session);
+   const running = harness.session.prompt("initial");
+   await within(started, () => "start");
+   await harness.session.prompt("USER STEER", { streamingBehavior: "steer" });
+   first.release();
+   await within(running, () => JSON.stringify(requests));
+   assert.deepEqual(requests, [["initial", "USER STEER"]], "steer belongs to the first next request, not a later run");
+   assert.equal(repeatedInputs, 0, "committed rows must not re-enter asynchronous input preflight");
+   const committed = harness.session.messages.filter(m => m.role === "custom" && m.customType === QUEUED_USER_MESSAGE_TYPE);
+   assert.equal(committed.length, 1, "exactly one durable queue-owned message");
+   assert.deepEqual(userTexts(harness.session), ["initial", "USER STEER"]);
+  } finally { first.release(); await harness.cleanup(); }
+ });
 }
 
 test("real AgentSession steers current work ahead of previously queued runs", async () => {

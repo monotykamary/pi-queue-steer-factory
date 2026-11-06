@@ -25,6 +25,7 @@
   "files": [
     "index.ts",
     "conversation-queue-bridge.ts",
+    "native-delivery.ts",
     "timeline-render.ts",
     "editor-render.ts",
     "fabric-peers.ts",

@@ -19,6 +19,7 @@ import {
 	type KeyId,
 } from "@earendil-works/pi-tui";
 import { registerConversationQueueBridge } from "./conversation-queue-bridge.ts";
+import { registerQueuedUserRenderer, sendQueuedUserMessage } from "./native-delivery.ts";
 import {
 	buildTimelineItems,
 	INDENT_ROW_KEY,
@@ -231,6 +232,7 @@ function modelChoices(search: string | undefined, models: readonly Model<Api>[])
 import { takeMessageBatch, shouldHoldFailedRun, canRecoverCompaction } from "./queue-policy.ts";
 
 export default function queueSteerExtension(pi: ExtensionAPI) {
+	registerQueuedUserRenderer(pi);
 	const queue = new DeliveryQueue<ImageContent>();
 	// Peer-UI interop (pi-fabric focused conversations): serves versioned
 	// conversation-queue handshakes with a bridge over this extension's real
@@ -453,19 +455,6 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		return takeMessageBatch(queue, editSession, queueModes(), lane);
 	};
 
-	/**
-	 * Pi's public sendUserMessage is fire-and-forget: the extension wrapper
-	 * discards the Promise. The agent loop polls steering/follow-up queues
-	 * immediately after turn_end/agent_end listeners resolve, so a delayed
-	 * prompt() would land after Fabric participant messages already sitting
-	 * in the native pending widget — including follow-ups that are not
-	 * steers. Drain microtasks so prompt() reaches agent.steer()/followUp()
-	 * before that poll.
-	 */
-	const settleNativeSend = async (): Promise<void> => {
-		for (let i = 0; i < 16; i++) await Promise.resolve();
-	};
-
 	const deliverBatchToNativeQueue = async (
 		ctx: ExtensionContext,
 		lane: QueueLane,
@@ -485,14 +474,10 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		let submitted = 0;
 		try {
 			for (const item of prepared) {
-				pi.sendUserMessage(userContent(item), { deliverAs: lane });
+				sendQueuedUserMessage(pi, userContent(item), lane, [item.id]);
 				submitted += 1;
 			}
-			await settleNativeSend();
 			persistCommittedQueue(ctx);
-			// The public send API is fire-and-forget. Once invoked, do not infer
-			// rejection from aggregate queue timing: a delayed preflight could
-			// otherwise accept the original after we restored and duplicate it.
 			return true;
 		} catch (error) {
 			queue.prependMany(items.slice(submitted));
@@ -771,7 +756,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 		resumeQueue();
 		renderQueue(ctx);
 		try {
-			pi.sendUserMessage(userContent(prepared), deliverAs ? { deliverAs } : undefined);
+			if (deliverAs) sendQueuedUserMessage(pi, userContent(prepared), deliverAs, [prepared.id]);
+			else pi.sendUserMessage(userContent(prepared));
 			persistCommittedQueue(ctx);
 			return true;
 		} catch (error) {
@@ -975,7 +961,8 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 		const idle = ctx.isIdle();
 		try {
-			pi.sendUserMessage(mergedDrainContent(prepared), idle ? undefined : { deliverAs: "steer" });
+			if (idle) pi.sendUserMessage(mergedDrainContent(prepared));
+			else sendQueuedUserMessage(pi, mergedDrainContent(prepared), "steer", prepared.map((item) => item.id));
 		} catch (error) {
 			queue.restore(original);
 			pauseQueue();

@@ -326,6 +326,7 @@ function createHarness(options: {
 	const handlers = new Map<string, Handler[]>();
 	const registeredCommands = new Map<string, { description?: string; handler: (args: string, context: any) => Promise<void> }>();
 	const sent: Array<{ content: unknown; options: any }> = [];
+	const nativeSends: Array<{ message: any; options: any }> = [];
 	const submitted: string[] = [];
 	const compactCalls: CompactOptions[] = [];
 	const notifications: Array<{ message: string; level: string }> = [];
@@ -435,6 +436,13 @@ function createHarness(options: {
 			registered.push(handler);
 			handlers.set(name, registered);
 		},
+		registerMessageRenderer() {},
+		sendMessage(message: any, sendOptions: any) {
+			if (options.sendFailureAt === sent.length + 1) throw new Error("synthetic send failure");
+			nativeSends.push({ message, options: sendOptions });
+			sent.push({ content: message.content, options: { deliverAs: sendOptions.deliverAs } });
+			pending = true;
+		},
 		sendUserMessage(content: unknown, sendOptions?: unknown) {
 			const invocation = typeof content === "string" && (sendOptions as { expandPromptTemplates?: boolean } | undefined)?.expandPromptTemplates
 				? /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(content)
@@ -482,6 +490,7 @@ function createHarness(options: {
 	return {
 		emit,
 		sent,
+		nativeSends,
 		submitted,
 		compactCalls,
 		notifications,
@@ -757,12 +766,15 @@ test("uses compact queue chrome at narrow terminal widths", async () => {
 	assert.deepEqual(component.render(20), ["queued S1 F1"]);
 });
 
-test("turn-end steering lands natively before a delayed send would lose the poll", async () => {
+test("turn-end steering uses the native lane without asynchronous prompt preflight", async () => {
 	const harness = createHarness({ asyncSend: true });
 	await harness.emit("session_start");
 	await enqueue(harness, "steer", "user steer");
 	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "toolUse" } });
 	assert.deepEqual(harness.sent, [{ content: "user steer", options: { deliverAs: "steer" } }]);
+	assert.equal(harness.nativeSends.length, 1);
+	assert.equal(harness.nativeSends[0]?.message.customType, "queue-steer:user");
+	assert.deepEqual(harness.nativeSends[0]?.options, { deliverAs: "steer", triggerTurn: true });
 });
 
 test("injects one owned steering row at Pi's native turn boundary", async () => {

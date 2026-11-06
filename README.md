@@ -35,7 +35,7 @@ pi install npm:pi-fabric
 Pin the current releases when you want reproducible installs:
 
 ```bash
-pi install npm:pi-queue-steer-factory@0.17.13
+pi install npm:pi-queue-steer-factory@0.17.14
 pi install npm:pi-fabric@0.83.0
 ```
 
@@ -121,7 +121,7 @@ The extension keeps Pi’s 2 delivery classes inside one ordered timeline:
 
 To steer a future queued run instead, queue its child with `Option+Enter`, select it with `Option+Up`, then indent with `Option+Right`. Reorder it beneath the desired run without saving first. A plan of `follow-up A → steer A → follow-up B` starts A after the current run, steers A at its next turn boundary, then starts B after A settles. Plain-Enter `/compact` and `/new` retain their safe tail placement behind earlier rows; explicit headless enqueue also remains append-only.
 
-The extension hands the timeline head back to Pi only when that row's delivery boundary arrives. Rows remain visible and editable before that point, and Pi records delivered rows as normal user messages. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
+The extension hands the timeline head back to Pi only when that row's delivery boundary arrives. Rows remain visible and editable before that point, and Pi presents delivered rows as user messages. During an active run, committed rows use the public native custom-message lane (`queue-steer:user`): the model receives unchanged user-role text/images, the TUI uses Pi's user-message renderer, and session consumers can identify the original queue row IDs in message details. This avoids replaying asynchronous `input` hooks at a turn boundary. Idle submissions still use normal user prompts. Queue ownership is TUI-only; RPC, JSON and print-mode input pass through unchanged.
 
 ## Run errors and retries
 

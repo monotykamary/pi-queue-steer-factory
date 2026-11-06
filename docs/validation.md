@@ -1,5 +1,11 @@
 # Compaction and reload validation
 
+## Native boundary delivery (0.17.14)
+
+The affected `native-delivery`, `queue-state` and `pi-integration` suites run against real Pi 1.5.0. The regression cases include forty additional input hooks and a hook yielding to the event loop: committed steering must reach the first next provider request without rerunning the prompt pipeline. Native envelopes preserve text/images and row IDs. The existing FIFO, one/all modes, pause/edit barriers, partial failures, compaction, reload and drain cases remain part of the targeted check.
+
+Active-run delivery uses Pi's public `sendMessage` native lane and user-message renderer. It does not patch Pi core or depend on a fixed number of microtasks. Persisted committed rows carry the `queue-steer:user` custom type; drafts and parked rows remain invisible custom queue snapshots.
+
 This document records the deterministic validation matrix for compaction-aware command rows. The implementation remains extension-only and uses public Pi extension APIs.
 
 ## Queue editor layout (0.17.8)
