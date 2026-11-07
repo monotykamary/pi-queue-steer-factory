@@ -1,5 +1,13 @@
 # Compaction and reload validation
 
+## Post-compaction steering (0.17.15)
+
+The first post-compaction `turn_start` proves summarization is over. Visible messages can then enter Pi's native steering lane without waiting for `agent_settled`; control commands retain their settlement barrier. The real `AgentSession` regression triggers overflow recovery and asserts the first subsequent provider request receives the steer exactly once, before any settlement.
+
+The targeted queue tests cover automatic message delivery, empty-composer `Enter`, `/queue-drain`, held control commands, repeated compaction, and failures or aborts of the resumed run. Existing manual completion, flush-grace, pause/edit, FIFO and recovery cases remain in that selection.
+
+`bun run test:tui-compaction -- /tmp/queue-compaction-tui` drives a real Pi session through overflow compaction in both fullscreen and regular terminals. It holds the resumed provider request open, forces a queued message with `Enter`, and checks that the outline clears without the stale compaction warning or an intervening settlement. Provider-call and lifecycle receipts confirm exactly-once delivery; captures retain the queued, forced and completed views.
+
 ## Native boundary delivery (0.17.14)
 
 The affected `native-delivery`, `queue-state` and `pi-integration` suites run against real Pi 1.5.0. The regression cases include forty additional input hooks and a hook yielding to the event loop: committed steering must reach the first next provider request without rerunning the prompt pipeline. Native envelopes preserve text/images and row IDs. The existing FIFO, one/all modes, pause/edit barriers, partial failures, compaction, reload and drain cases remain part of the targeted check.

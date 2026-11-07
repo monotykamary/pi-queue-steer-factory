@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	fauxAssistantMessage,
@@ -52,6 +52,22 @@ const respond: FauxResponseFactory = async (context, options, state) => {
 		return fauxAssistantMessage("FAUX COMPACTION SUMMARY");
 	}
 
+	if (existsSync(pathInState("overflow-once")) && !existsSync(pathInState("overflow-fired"))) {
+		writeFileSync(pathInState("overflow-fired"), "1");
+		return fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" });
+	}
+
+	// Compaction may replace the original prompt with a summary. Gate the
+	// first resumed request by lifecycle state rather than its prompt text.
+	if (existsSync(pathInState("hold-post-compaction")) && existsSync(pathInState("compaction-completed"))
+		&& !existsSync(pathInState("post-compaction-request-started"))) {
+		writeFileSync(pathInState("post-compaction-request-started"), "1");
+		while (!existsSync(pathInState("release-post-compaction"))) {
+			if (options?.signal?.aborted) return fauxAssistantMessage("", { stopReason: "aborted" });
+			await new Promise(resolve => setTimeout(resolve, 20));
+		}
+	}
+
 	const gate = /^BLOCK:([a-z0-9-]+)/.exec(lastUser)?.[1];
 	if (gate) {
 		while (!existsSync(pathInState(`gate-${gate}`))) {
@@ -73,6 +89,14 @@ export default function tuiFauxProvider(pi: ExtensionAPI): void {
 			`${JSON.stringify({ event: "session_before_compact", reason: event.reason })}\n`,
 		);
 	});
+	const recordEvent = (event: string): void => {
+		appendFileSync(pathInState("events.jsonl"), `${JSON.stringify({ event })}\n`);
+	};
+	pi.on("session_compact", () => {
+		writeFileSync(pathInState("compaction-completed"), "1");
+		recordEvent("session_compact");
+	});
+	pi.on("agent_settled", () => recordEvent("agent_settled"));
 	const model = faux.getModel();
 	pi.registerProvider(model.provider, {
 		name: "Queue evidence faux provider",

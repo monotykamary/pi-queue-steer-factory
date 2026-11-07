@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.15 - 2026-11-07
+
+### Fixed
+
+- Release the message hold on the first resumed turn after compaction, instead of blocking steering until the entire run settles. Empty-composer `Enter` and `/queue-drain` can now steer the resumed run without stopping it.
+- Keep control commands behind the post-compaction settlement barrier. Rearm the message hold for subsequent compactions, reject stale completion timers, and preserve pause/error holds if the resumed run fails or is aborted.
+
+### Tests
+
+- Reproduce the old delay against real Pi overflow recovery and verify steering reaches the next request before settlement. Cover forced delivery, command ordering, repeated compaction and failed/aborted resumed runs.
+- Add a real fullscreen/regular-terminal compaction probe with screenshots and provider/lifecycle receipts.
+
 ## 0.17.14 - 2026-11-06
 
 ### Fixed

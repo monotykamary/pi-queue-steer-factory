@@ -155,6 +155,7 @@ Text-only rows matching `/compact [instructions]`, `/reload`, `/new`, `/model [t
 - `/reload` queued as a follow-up runs at settle, sidestepping Pi's built-in busy wait warning; steered, it fires at the next turn boundary and Pi's own busy handling applies
 - plain `Enter` on `/compact` or `/new` while the agent works parks it as a steer row instead of firing instantly: it runs at the next turn boundary — after the turn's in-flight tool results land — and the extension owns the abort tail; from idle, both still start immediately and a started compaction holds visible rows until it settles
 - ordinary messages submitted during compaction remain in Pi's native queue and can run before extension-owned command rows after compaction finishes
+- once the first post-compaction turn starts, visible messages can steer that resumed run normally, including empty-composer `Enter` and `/queue-drain`; control commands still wait for the resumed run to settle, and another compaction rearms the message hold
 - stopped `Option+Enter` parks `/compact` and `/reload` paused like every other control row; they run only on an explicit empty-composer `Enter`
 - unsupported command forms, including `/fabric prewalk <task>`, are not control rows; queue exact `/fabric prewalk` and the task as separate rows
 - command rows show a `⚙` marker and keep the same pause, edit, reorder and snapshot semantics as messages

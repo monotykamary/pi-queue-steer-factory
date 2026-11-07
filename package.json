@@ -49,6 +49,7 @@
   "scripts": {
     "test:host": "node scripts/pi1-host.mjs",
     "test:tui-layout": "node test/tui-editor-layout.mjs",
+    "test:tui-compaction": "node test/tui-compaction.mjs",
     "check": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "ci": "npm run check && npm test",

@@ -263,7 +263,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// The completion then stops the run at the tool boundary.
 	let pauseAfterToolsArmed = false;
 	const inFlightTools = new Map<string, string>();
-	let blockingActivity: "compact" | "auto-compact" | "reload" | "new" | "model" | "thinking" | "fabric-prewalk" | "fabric-await" | undefined;
+	let blockingActivity: "compact" | "auto-compact" | "post-compact" | "reload" | "new" | "model" | "thinking" | "fabric-prewalk" | "fabric-await" | undefined;
 	let fabricAwaitAbort: AbortController | undefined;
 	let fabricAwaitNote = "";
 	let pendingNewRowId: string | undefined;
@@ -289,6 +289,9 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// and must not release the error hold.
 	let compactionIsOverflowRecovery = false;
 	const isCompacting = (): boolean => blockingActivity === "compact" || blockingActivity === "auto-compact";
+	// A resumed post-compaction run still holds control commands until settlement,
+	// but messages must be able to join it at normal native steering boundaries.
+	const messageDispatchBlocked = (): boolean => blockingActivity !== undefined && blockingActivity !== "post-compact";
 	const trackNativeCompactionSubmission = (
 		text: string,
 		behavior: "submit" | "followUp" = "submit",
@@ -451,7 +454,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 	// row stops the batch (FIFO): rows behind it dispatch after the control.
 	const takeLaneBatch = (lane: QueueLane): QueuedMessage<ImageContent>[] => {
 		const head = queue.peek();
-		if (paused || blockingActivity || head?.lane !== lane || laneIsHeld(lane)) return [];
+		if (paused || messageDispatchBlocked() || head?.lane !== lane || laneIsHeld(lane)) return [];
 		return takeMessageBatch(queue, editSession, queueModes(), lane);
 	};
 
@@ -815,14 +818,15 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 
 	const deferCompactionFinish = (
 		ctx: ExtensionContext,
-		activity: "compact" | "auto-compact",
+		activity: "compact" | "auto-compact" | "post-compact",
 	): void => {
+		const epoch = compactionEpoch;
 		compactionFinishTimer = setTimeout(() => {
 			compactionFinishTimer = undefined;
-			if (blockingActivity !== activity) return;
+			if (epoch !== compactionEpoch || blockingActivity !== activity) return;
 			// Pi flushes ordinary TUI submissions after compaction without
 			// awaiting prompt preflight. Keep command rows behind that native run.
-			if (nativeCompactionInputQueued) {
+			if (activity !== "post-compact" && nativeCompactionInputQueued) {
 				armNativeFlushGrace(activeContext ?? ctx, activity);
 				renderQueue(activeContext ?? ctx);
 				return;
@@ -914,7 +918,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("Finish or cancel row editing before draining the queue", "info");
 			return;
 		}
-		if (blockingActivity) {
+		if (messageDispatchBlocked()) {
 			ctx.ui.notify("The queue drains after the current control command finishes", "info");
 			return;
 		}
@@ -1534,7 +1538,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 
 	pi.on("session_before_compact", (event, ctx) => {
 		activeContext = ctx;
-		if (blockingActivity || event.reason === "manual") return;
+		if ((blockingActivity && blockingActivity !== "post-compact") || event.reason === "manual") return;
 		blockingActivity = "auto-compact";
 		compactionEpoch += 1;
 		cancelNativeFlushGrace();
@@ -1551,10 +1555,16 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 
 	pi.on("turn_start", (_event, ctx) => {
 		activeContext = ctx;
-		if (isCompacting() && nativeCompactionInputQueued) {
+		if (isCompacting() && !extensionCompactionInFlight) {
+			// Host turn_start proves summarization ended, including an automatic
+			// compact-and-retry without any native composer input. Do not release
+			// controls here: they still belong after this resumed run settles.
+			blockingActivity = "post-compact";
 			nativeCompactionTurnStarted = true;
-			// The flushed run is live; its settle owns the finish now.
+			// A later failure belongs to this new run, not the old overflow recovery.
+			compactionIsOverflowRecovery = false;
 			cancelNativeFlushGrace();
+			renderQueue(ctx);
 		}
 	});
 
@@ -1565,7 +1575,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 			// /compact, /new or /reload firing mid-run aborts the in-flight run
 			// on purpose. Only a bare user abort, or one under Pi-initiated
 			// auto-compaction, parks the queue.
-			if (queue.length > 0 && (blockingActivity === undefined || blockingActivity === "auto-compact")) {
+			if (queue.length > 0 && (blockingActivity === undefined || blockingActivity === "auto-compact" || blockingActivity === "post-compact")) {
 				pauseQueue();
 			}
 			renderQueue(ctx);
@@ -1616,7 +1626,7 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 		// not be classified — let alone parked — as a failed run.
 		if (
 			lastMessage?.role === "assistant"
-			&& !blockingActivity
+			&& !messageDispatchBlocked()
 			&& (
 				lastMessage.stopReason === "error"
 				|| isContextOverflow(lastMessage, ctx.model?.contextWindow ?? 0)
@@ -1657,9 +1667,9 @@ const installSubmitGuard = (editor: EditorComponent, ctx: ExtensionContext, isAc
 			renderQueue(ctx);
 			return;
 		}
-		if (blockingActivity === "compact" || blockingActivity === "auto-compact") {
+		if (blockingActivity === "compact" || blockingActivity === "auto-compact" || blockingActivity === "post-compact") {
 			const activity = blockingActivity;
-			if (nativeCompactionInputQueued && !nativeCompactionTurnStarted) {
+			if (activity !== "post-compact" && nativeCompactionInputQueued && !nativeCompactionTurnStarted) {
 				armNativeFlushGrace(ctx, activity);
 				renderQueue(ctx);
 				return;

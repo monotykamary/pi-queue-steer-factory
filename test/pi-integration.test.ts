@@ -610,6 +610,55 @@ test("real public prompt path triggers overflow compaction and preserves a queue
 	}
 });
 
+test("real compaction retry accepts steering before the run settles", async () => {
+	let resumeStarted!: () => void;
+	const resumedRequest = new Promise<void>(resolve => { resumeStarted = resolve; });
+	const summaryExtension: ExtensionFactory = pi => {
+		pi.on("session_before_compact", event => ({
+			compaction: {
+				summary: "compact retry summary",
+				firstKeptEntryId: event.preparation.firstKeptEntryId,
+				tokensBefore: event.preparation.tokensBefore,
+			},
+		}));
+	};
+	const harness = await createIntegrationHarness({ extraExtensions: [summaryExtension] });
+	const failed = gatedResponse("", { stopReason: "error", errorMessage: "prompt is too long" });
+	const resumed = gatedResponse("resumed after summary");
+	let settled = false;
+	const requests: Array<{ texts: string[]; settled: boolean }> = [];
+	try {
+		await seedSession(harness);
+		harness.session.subscribe(event => { if (event.type === "agent_settled") settled = true; });
+		harness.faux.setResponses([
+			failed.step,
+			() => { resumeStarted(); return resumed.step(); },
+			context => {
+				requests.push({ texts: context.messages.filter(m => m.role === "user").map(m =>
+					typeof m.content === "string" ? m.content : m.content.filter(p => p.type === "text").map(p => p.text).join("\n")), settled });
+				return fauxAssistantMessage("steering received");
+			},
+		]);
+		const started = nextAgentStart(harness.session);
+		const running = harness.session.prompt("trigger overflow retry");
+		await within(started, () => "overflow request did not start");
+		failed.release();
+		await within(resumedRequest, () => "compaction never resumed the run");
+		assert.equal(settled, false);
+		await harness.session.prompt("STEER AFTER COMPACTION", { streamingBehavior: "steer" });
+		resumed.release();
+		await within(running, () => JSON.stringify(requests));
+		assert.equal(requests.length, 1);
+		assert.ok(requests[0]?.texts.includes("STEER AFTER COMPACTION"));
+		assert.equal(requests[0]?.settled, false, "the steer must not wait for a new run after agent_settled");
+		assert.equal(userTexts(harness.session).filter(text => text === "STEER AFTER COMPACTION").length, 1);
+	} finally {
+		failed.release();
+		resumed.release();
+		await harness.cleanup();
+	}
+});
+
 test("real registered drain command pours queued rows into one steering message", async () => {
 	const harness = await createIntegrationHarness();
 	try {

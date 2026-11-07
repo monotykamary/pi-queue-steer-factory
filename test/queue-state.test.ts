@@ -2303,6 +2303,83 @@ test("a failed compact-and-retry keeps the error hold parked until Enter", async
 	assert.equal(harness.sent[0]?.content, "still parked");
 });
 
+test("post-compaction turns release steering but retain the command settlement barrier", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await harness.emit("session_before_compact", { reason: "overflow" });
+	await enqueue(harness, "steer", "steer after summary");
+	await enqueue(harness, "steer", "/reload");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+	assert.equal(harness.sent.length, 0, "summarization still blocks messages");
+
+	await harness.emit("turn_start");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+	assert.deepEqual(harness.sent.map(s => s.content), ["steer after summary"]);
+	assert.equal(harness.nativeSends[0]?.options.deliverAs, "steer");
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+	assert.deepEqual(harness.submitted, [], "control commands still wait for settlement");
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.submitted.length === 1);
+	assert.deepEqual(harness.submitted, ["/reload"]);
+});
+
+for (const force of ["enter", "drain"] as const) {
+	test(`post-compaction ${force} can force messages into the resumed run`, async () => {
+		const harness = createHarness();
+		await harness.emit("session_start");
+		await harness.emit("session_before_compact", { reason: "threshold" });
+		await enqueue(harness, "followUp", "forced after summary");
+		await harness.emit("turn_start");
+		if (force === "enter") harness.editor.handleInput("enter");
+		else await harness.runCommand("queue-drain");
+		assert.deepEqual(harness.sent.map(s => s.content), ["forced after summary"]);
+		assert.equal(harness.nativeSends[0]?.options.deliverAs, "steer");
+		assert.equal(harness.notifications.some(n => /after compaction finishes|control command finishes/.test(n.message)), false);
+	});
+}
+
+test("post-compaction hold rearms for another compaction and still parks failed or aborted runs", async () => {
+	for (const stopReason of ["error", "aborted"] as const) {
+		const harness = createHarness();
+		await harness.emit("session_start");
+		await harness.emit("session_before_compact", { reason: "threshold" });
+		await harness.emit("turn_start");
+		await harness.emit("session_before_compact", { reason: "overflow" });
+		await enqueue(harness, "steer", "held again");
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+		assert.equal(harness.sent.length, 0, "the second summarization must rearm the message barrier");
+		await harness.emit("turn_start");
+		await harness.emit("turn_end", { message: { role: "assistant", stopReason, errorMessage: "failure" } });
+		await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason, errorMessage: "failure", content: [] }] });
+		harness.setIdle(true);
+		await harness.emit("agent_settled");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		assert.equal(harness.sent.length, 0);
+		assert.match(renderWidget(harness), /paused/);
+	}
+});
+
+test("a stale post-compaction finish cannot release a later resumed run", async () => {
+	const harness = createHarness();
+	await harness.emit("session_start");
+	await harness.emit("session_before_compact", { reason: "threshold" });
+	await harness.emit("turn_start");
+	harness.setIdle(true);
+	await harness.emit("agent_settled"); // completion timer for the first epoch
+	await harness.emit("session_before_compact", { reason: "threshold" });
+	await harness.emit("turn_start");
+	harness.setIdle(false);
+	await enqueue(harness, "steer", "/reload");
+	await new Promise(resolve => setTimeout(resolve, 0));
+	await harness.emit("turn_end", { message: { role: "assistant", stopReason: "stop" } });
+	assert.deepEqual(harness.submitted, [], "stale timer must leave the new command barrier armed");
+	harness.setIdle(true);
+	await harness.emit("agent_settled");
+	await waitFor(() => harness.submitted.length === 1);
+	assert.deepEqual(harness.submitted, ["/reload"]);
+});
+
 test("holds reload through automatic compaction until the agent settles", async () => {
 	const harness = createHarness();
 	await harness.emit("session_start");
