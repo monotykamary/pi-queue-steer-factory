@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.16 - 2026-11-09
+
+### Changed
+
+- Import `isContextOverflow` from the `@earendil-works/pi-ai` root instead of `pi-ai/compat`, so loading the extension no longer initializes the compat provider registry.
+
 ## 0.17.15 - 2026-11-07
 
 ### Fixed
