@@ -1,5 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isContextOverflow } from "@earendil-works/pi-ai/compat";
+// The public root exports overflow detection without compat's provider-registry
+// initialization. Pi maps the root to its supplied host view in managed installs.
+import { isContextOverflow } from "@earendil-works/pi-ai";
 import { QueueController, type DispatchResult, type QueuePorts } from "./headless.ts";
 import type { QueueBoundary } from "./protocol.ts";
 

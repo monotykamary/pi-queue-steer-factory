@@ -1,5 +1,5 @@
 import type { Api, ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
-import { isContextOverflow } from "@earendil-works/pi-ai/compat";
+import { isContextOverflow } from "@earendil-works/pi-ai";
 import {
 	CustomEditor,
 	keyText,
