@@ -1092,7 +1092,7 @@ export default function queueSteerExtension(pi: ExtensionAPI) {
 				}
 			};
 
-			editor.render = (width: number): string[] => {
+			editor.render = (width: number): readonly string[] => {
 				if (!state.active) return renderEditor(width);
 				if (editSession && !renderingInline) {
 					// Fullscreen Pi reserves at least three editor rows even when render

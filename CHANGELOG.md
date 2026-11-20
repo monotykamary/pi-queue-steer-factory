@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.17 - 2026-11-20
+
+### Fixed
+
+- Preserve the wrapped editor’s read-only render output on Pi 1.6.
+
 ## 0.17.16 - 2026-11-09
 
 ### Changed
